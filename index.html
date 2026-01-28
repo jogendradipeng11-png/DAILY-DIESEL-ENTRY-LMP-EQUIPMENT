@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LMP Diesel Enterprise</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
+    header { padding: 16px; font-size: 20px; font-weight: bold; background: #020617; }
+    .container { padding: 16px; max-width: 1600px; margin: auto; }
+    .card { background: #020617; padding: 16px; border-radius: 14px; margin-bottom: 16px; }
+    input, select, button { margin: 4px; padding: 6px 10px; border-radius: 4px; font-size: 14px; }
+    button { background: #3b82f6; color: white; border: none; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    button.ghost { background: #1f2937; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #1f2937; padding: 6px; text-align: center; }
+    th { background: #020617; position: sticky; top: 0; z-index: 1; }
+    .left { text-align: left; }
+    .muted { color: #94a3b8; font-size: 0.9em; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .flex-1 { flex: 1; min-width: 200px; }
+    .balance-green { color: #86efac; }
+    .balance-red   { color: #fca5a5; }
+    .balance-gray  { color: #cbd5e1; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-size: 12px; }
+    .unsaved-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#fbbf24; vertical-align:middle; margin-left:6px; }
+    .progress-bar { margin-top: 6px; width: 100%; background: #1f2937; height: 8px; border-radius: 6px; overflow: hidden; }
+    .progress-bar > div { height: 100%; background: #3b82f6; transition: width 180ms; }
+    .flash { padding: 10px 12px; border-radius: 8px; }
+    .flash.success { background:#064e3b; color:#d1fae5; border:1px solid #065f46; }
+    .flash.error { background:#7f1d1d; color:#fee2e2; border:1px solid #991b1b; }
+    .section-subtle { border-top:1px solid #1f2937; padding-top:8px; margin-top:8px; }
+    .error { color: #fca5a5; font-size: 12px; margin-top: 2px; }
+    .input-error { border: 1px solid #ef4444; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React UMD (development). For production use .production.min.js -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+    import {
+      getAuth,
+      signInWithEmailAndPassword,
+      createUserWithEmailAndPassword,
+      onAuthStateChanged,
+      signOut
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+    import {
+      getDatabase,
+      ref, set, onValue, update, get, push, remove, serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyB4WcFUhQLHYSU6lecY9xWAQYjApNp9LG4",
+      authDomain: "studio-6256088054-e3eee.firebaseapp.com",
+      databaseURL: "https://studio-6256088054-e3eee-default-rtdb.firebaseio.com",
+      projectId: "studio-6256088054-e3eee",
+      storageBucket: "studio-6256088054-e3eee.firebasestorage.app",
+      messagingSenderId: "551506815271",
+      appId: "1:551506815271:web:f55987b56469db956e2102",
+      measurementId: "G-FYSMRPVYMX"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    const { useState, useEffect, useMemo } = React;
+
+    // ───────────────────────── Helpers ─────────────────────────
+    function isValidNonNegativeNumber(v, max = Number.MAX_SAFE_INTEGER) {
+      if (v === '' || v === null || v === undefined) return false;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 && n <= max;
+    }
+    function isDateInMonth(isoDate, ym) {
+      if (!isoDate || !ym) return false;
+      const d = new Date(isoDate);
+      if (isNaN(d.getTime())) return false;
+      const [y, m] = ym.split('-').map(Number);
+      return d.getFullYear() === y && (d.getMonth() + 1) === m;
+    }
+    const sortByName = arr => [...(arr || [])].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const safeId = (suffix='') => `${Date.now()}_${Math.floor(Math.random()*1e6)}${suffix ? '_' + suffix : ''}`;
+
+    // CSV helpers
+    function splitCSVLine(line) {
+      const result = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+          else { inQuotes = !inQuotes; }
+        } else if (ch === ',' && !inQuotes) { result.push(cur); cur = ''; }
+        else { cur += ch; }
+      }
+      result.push(cur);
+      return result;
+    }
+    const normName = (name) => (name || '').trim();
+    const normKey  = (name) => normName(name).toLowerCase();
+    function toNum(val) {
+      if (val === null || val === undefined) return 0;
+      const s = String(val).trim().replace(/\r/g, '');
+      if (s === '') return 0;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    // ───────────────────────── App ─────────────────────────
+    function App() {
+      const [user, setUser] = useState(null);
+      const [role, setRole] = useState('staff');
+      const [company, setCompany] = useState('');
+      const [site, setSite] = useState('');
+
+      useEffect(() => {
+        const unsub = onAuthStateChanged(auth, u => {
+          setUser(u);
+          if (u) {
+            onValue(ref(db, `users/${u.uid}`), snap => {
+              if (snap.exists()) {
+                const v = snap.val();
+                setRole(v.role || 'staff');
+                setCompany(v.company || 'LMP');
+                setSite(v.site || 'Jafurah');
+              } else {
+                // Keeping your prototype default (first-time profile)
+                set(ref(db, `users/${u.uid}`), { email: u.email, role: 'admin', company: 'LMP', site: 'Jafurah' });
+                setRole('admin'); setCompany('LMP'); setSite('Jafurah');
+              }
+            });
+          }
+        });
+        return unsub;
+      }, []);
+
+      return React.createElement('div', null,
+        React.createElement('header', null, '⛽ LMP Diesel Enterprise'),
+        React.createElement('div', { className: 'container' },
+          !user && React.createElement(AuthForm),
+          user && React.createElement(Dashboard, { user, role, company, site, setCompany, setSite })
+        )
+      );
+    }
+
+    // ───────────────────────── Auth ─────────────────────────
+    function AuthForm() {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [msg, setMsg] = useState('');
+      const [errors, setErrors] = useState({ email: '', password: '' });
+
+      const validate = () => {
+        const e = { email: '', password: '' };
+        if (!email || !/^\S+@\S+\.\S+$/.test(email)) e.email = 'Enter a valid email address.';
+        if (!password || password.length < 6) e.password = 'Password must be at least 6 characters.';
+        setErrors(e);
+        return !e.email && !e.password;
+      };
+
+      const login = () => {
+        if (!validate()) return;
+        signInWithEmailAndPassword(auth, email, password).catch(e => setMsg(e.message));
+      };
+
+      const register = () => {
+        if (!validate()) return;
+        createUserWithEmailAndPassword(auth, email, password)
+          .then(cred => set(ref(db, `users/${cred.user.uid}`), { email, role: 'admin', company: 'LMP', site: 'Jafurah' }))
+          .catch(e => setMsg(e.message));
+      };
+
+      return React.createElement('div', { className: 'card' },
+        React.createElement('h3', null, 'Login / Register'),
+        React.createElement('div', null,
+          React.createElement('input', {
+            type: 'email',
+            placeholder: 'Email',
+            value: email,
+            onChange: e => setEmail(e.target.value),
+            className: errors.email ? 'input-error' : ''
+          }),
+          errors.email && React.createElement('div', { className: 'error' }, errors.email)
+        ),
+        React.createElement('div', null,
+          React.createElement('input', {
+            type: 'password',
+            placeholder: 'Password',
+            value: password,
+            onChange: e => setPassword(e.target.value),
+            className: errors.password ? 'input-error' : ''
+          }),
+          errors.password && React.createElement('div', { className: 'error' }, errors.password)
+        ),
+        React.createElement('div', { className: 'row' },
+          React.createElement('button', { onClick: login }, 'Login'),
+          React.createElement('button', { onClick: register }, 'Register (Admin)')
+        ),
+        msg && React.createElement('div', { style: { color: '#fca5a5', marginTop: '8px' } }, msg)
+      );
+    }
+
+    // ───────────────────────── Dashboard ─────────────────────────
+    function Dashboard({ user, role, company, site, setCompany, setSite }) {
+      const [ym, setYm] = useState(() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      });
+      const [view, setView] = useState('sheet');
+      const basePath = `companies/${company}/sites/${site}/users/${user.uid}`;
+
+      // Equipments: each { id (Firebase key), name }
+      const [equipments, setEquipments] = useState([]);
+
+      // Pending path->value updates (opening + sheet cells)
+      const [pending, setPending] = useState({});
+      // Draft received entries
+      const [receivedDrafts, setReceivedDrafts] = useState([]);
+      // Import progress & flash
+      const [importProgress, setImportProgress] = useState({ running: false, phase: '', processed: 0, total: 0, cells: 0, errors: 0 });
+      const [flash, setFlash] = useState(null);
+
+      const showFlash = (type, text) => {
+        setFlash({ type, text });
+        setTimeout(() => setFlash(null), 3000);
+      };
+
+      // Subscribe equipments (read Firebase key as id)
+      useEffect(() => {
+        const eqRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+        const unsub = onValue(eqRef, snap => {
+          const arr = [];
+          if (snap.exists()) {
+            snap.forEach(c => {
+              const v = c.val() || {};
+              arr.push({ id: c.key, name: v.name || '' });
+            });
+          }
+          setEquipments(sortByName(arr));
+        });
+        return unsub;
+      }, [basePath, ym]);
+
+      const queueUpdate = (path, value) => {
+        setPending(prev => {
+          const next = { ...prev };
+          if (value === undefined) delete next[path]; else next[path] = value;
+          return next;
+        });
+      };
+
+      const pendingCount = Object.keys(pending).length + receivedDrafts.length;
+
+      const saveAll = async () => {
+        const pathCount = Object.keys(pending).length;
+        const draftsCount = receivedDrafts.length;
+
+        // Guard invalid numbers
+        for (const [p, v] of Object.entries(pending)) {
+          if (typeof v === 'number' && (!Number.isFinite(v) || v < 0)) {
+            alert('There are invalid numeric values. Please fix highlighted fields before saving.');
+            return;
+          }
+        }
+        if (pathCount === 0 && draftsCount === 0) {
+          alert('No changes to save.');
+          return;
+        }
+
+        try {
+          const updates = { ...pending };
+          const recvRoot = `${basePath}/received/${ym}`;
+          receivedDrafts.forEach((d, i) => {
+            const key = safeId(i);
+            updates[`${recvRoot}/${key}`] = {
+              date: d.date,
+              quantity: Number(d.quantity) || 0,
+              notes: d.notes || '',
+              ts: serverTimestamp()
+            };
+          });
+
+          await update(ref(db), updates);
+          setPending({});
+          setReceivedDrafts([]);
+          showFlash('success', `Saved ${pathCount} change(s) and ${draftsCount} received entr${draftsCount === 1 ? 'y' : 'ies'}.`);
+        } catch (e) {
+          showFlash('error', `Save failed: ${e?.message || e}`);
+          alert('Save failed: ' + (e?.message || e));
+        }
+      };
+
+      const discardAll = () => {
+        const pathCount = Object.keys(pending).length;
+        const draftsCount = receivedDrafts.length;
+        const total = pathCount + draftsCount;
+        if (total === 0) return;
+
+        const ok = confirm(
+          `Discard unsaved changes?\n\n` +
+          `• Pending cell/opening changes: ${pathCount}\n` +
+          `• Draft received entries: ${draftsCount}\n\n` +
+          `This will revert to the last saved data.`
+        );
+        if (!ok) return;
+
+        setPending({});
+        setReceivedDrafts([]);
+        showFlash('success', 'All pending changes discarded.');
+      };
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'card row' },
+          React.createElement('div', null, `User: ${user.email}`),
+          React.createElement('div', null, `Role: ${role}`),
+          React.createElement('button', { onClick: () => signOut(auth) }, 'Logout'),
+          React.createElement('span', { className: 'muted' }, ' | Company: '),
+          React.createElement('input', { value: company, onChange: e => setCompany(e.target.value), disabled: role !== 'admin', style: { width: '140px' } }),
+          React.createElement('span', { className: 'muted' }, ' Site: '),
+          React.createElement('input', { value: site, onChange: e => setSite(e.target.value), disabled: role !== 'admin', style: { width: '140px' } })
+        ),
+
+        React.createElement(MonthlyBalanceSummary, { basePath, ym, queueUpdate, hasPending: (path) => Boolean(pending[path]) }),
+
+        React.createElement('div', { className: 'card row' },
+          React.createElement('h3', null, 'Month'),
+          React.createElement('input', { type: 'month', value: ym, onChange: e => setYm(e.target.value) }),
+          React.createElement('button', { onClick: () => exportCSV(basePath, ym, company, site) }, 'Export CSV'),
+          React.createElement('button', { onClick: () => window.location.reload() }, 'Refresh'),
+          React.createElement('button', { onClick: () => setView('sheet') }, 'Sheet'),
+          React.createElement('button', { onClick: () => setView('report') }, 'Report')
+        ),
+
+        React.createElement('div', { className: 'card' },
+          React.createElement('div', { className: 'row' },
+            React.createElement('h3', null, 'Finalize'),
+            React.createElement('span', { className: 'pill' }, `Pending: ${pendingCount}`),
+            React.createElement('button', { onClick: saveAll, disabled: pendingCount === 0 }, 'Save All'),
+            React.createElement('button', { className: 'ghost', onClick: discardAll, disabled: pendingCount === 0 }, 'Discard Changes')
+          ),
+          flash && React.createElement('div', { className: `flash ${flash.type} section-subtle` }, flash.text)
+        ),
+
+        React.createElement('div', { className: 'card' },
+          React.createElement('h3', null, 'Daily Consumption'),
+          React.createElement(DailyEntryForm, { basePath, ym, equipments })
+        ),
+
+        React.createElement('div', { className: 'card' },
+          React.createElement('h3', null, 'Diesel Received'),
+          React.createElement(ReceivedDraftForm, { ym, onDraft: (entry) => setReceivedDrafts(prev => [...prev, entry]) }),
+          React.createElement(ReceivedSummary, { basePath, ym, drafts: receivedDrafts, removeDraft: (id) => setReceivedDrafts(prev => prev.filter(d => d.id !== id)) })
+        ),
+
+        React.createElement('div', { className: 'card' },
+          React.createElement('div', { className: 'row' },
+            React.createElement('h3', null, 'Import CSV'),
+            React.createElement('input', { type: 'file', accept: '.csv', id: 'importFile' }),
+            React.createElement('button', {
+              onClick: () => importCSV(basePath, ym, setEquipments, setImportProgress),
+              disabled: importProgress.running
+            }, importProgress.running ? 'Importing…' : 'Import'),
+            React.createElement('button', { onClick: () => window.location.reload() }, 'Refresh')
+          ),
+          (importProgress.running || importProgress.phase) && React.createElement('div', { className: 'section-subtle' },
+            React.createElement('div', { className: 'muted' }, importProgress.phase || 'Ready'),
+            (importProgress.total > 0) && React.createElement('div', null,
+              `Rows: ${importProgress.processed}/${importProgress.total} | Cells: ${importProgress.cells} | Errors: ${importProgress.errors}`
+            ),
+            (importProgress.total > 0) && React.createElement('div', { className: 'progress-bar' },
+              React.createElement('div', { style: { width: `${Math.min(100, Math.round((importProgress.processed / importProgress.total) * 100))}%` } })
+            )
+          )
+        ),
+
+        React.createElement('div', { className: 'card' },
+          React.createElement('h3', null, 'Equipments'),
+          React.createElement(EquipmentManager, { basePath, ym, equipments, setEquipments })
+        ),
+
+        view === 'sheet' && React.createElement('div', { className: 'card' },
+          React.createElement('h3', null, `Consumption Sheet – ${company} / ${site}`),
+          React.createElement(MonthlySheet, { basePath, ym, role, equipments, queueUpdate })
+        ),
+
+        view === 'report' && React.createElement('div', { className: 'card' },
+          React.createElement(PerEquipmentReport, { basePath, ym, equipments })
+        )
+      );
+    }
+
+    // ───────────────────────── Month & Totals helpers ─────────────────────────
+    function daysInMonth(ym) {
+      const [y, m] = ym.split('-').map(Number);
+      return new Date(y, m, 0).getDate();
+    }
+    async function getMonthlyTotals(basePath, ym) {
+      const [receivedSnap, dataSnap, openingSnap] = await Promise.all([
+        get(ref(db, `${basePath}/received/${ym}`)),
+        get(ref(db, `${basePath}/sheets/${ym}/data`)),
+        get(ref(db, `${basePath}/sheets/${ym}/openingStock`))
+      ]);
+
+      let received = 0;
+      receivedSnap.exists() && receivedSnap.forEach(c => received += Number(c.val().quantity || 0));
+
+      let consumed = 0;
+      if (dataSnap.exists()) {
+        const data = dataSnap.val();
+        Object.values(data).forEach(obj => Object.values(obj).forEach(v => consumed += Number(v || 0)));
+      }
+
+      const opening = Number(openingSnap.val() || 0);
+      return { opening, received, consumed, closing: opening + received - consumed };
+    }
+
+    // ───────────────────────── Balance & Opening (queued) ─────────────────────────
+    function MonthlyBalanceSummary({ basePath, ym, queueUpdate, hasPending }) {
+      const [totals, setTotals] = useState({ opening: 0, received: 0, consumed: 0, closing: 0 });
+      const [loading, setLoading] = useState(true);
+      const [openingDraft, setOpeningDraft] = useState(0);
+      const [err, setErr] = useState('');
+
+      useEffect(() => {
+        setLoading(true);
+        getMonthlyTotals(basePath, ym).then(t => {
+          setTotals(t);
+          setOpeningDraft(t.opening);
+          setErr('');
+          setLoading(false);
+        });
+      }, [basePath, ym]);
+
+      const color = totals.closing > 0 ? 'balance-green' : totals.closing < 0 ? 'balance-red' : 'balance-gray';
+      const openingPath = `${basePath}/sheets/${ym}/openingStock`;
+
+      const queueOpening = () => {
+        if (!isValidNonNegativeNumber(openingDraft, 100000000)) {
+          setErr('Opening must be a non-negative number (max 100,000,000).');
+          return;
+        }
+        setErr('');
+        queueUpdate(openingPath, Number(openingDraft));
+        alert('Opening stock change queued. Click "Save All" to apply.');
+      };
+
+      return React.createElement('div', { className: 'card' },
+        React.createElement('h3', null, `Balance – ${ym}`),
+        loading ? 'Loading...' : React.createElement('div', { className: 'row', style: { justifyContent: 'space-between', textAlign: 'center' } },
+          ['Opening', 'Received', 'Consumed', 'Closing'].map((label, i) => {
+            const val = [totals.opening, totals.received, totals.consumed, totals.closing][i];
+            const node = i === 0
+              ? React.createElement('div', null,
+                  React.createElement('div', { className: 'muted' }, 'Opening'),
+                  React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' } },
+                    React.createElement('input', {
+                      type: 'number',
+                      value: openingDraft,
+                      onChange: e => setOpeningDraft(e.target.value),
+                      style: { width: '160px', textAlign: 'right' },
+                      className: err ? 'input-error' : ''
+                    }),
+                    hasPending(openingPath) ? React.createElement('span', { className: 'unsaved-dot', title: 'Opening queued' }) : null,
+                    React.createElement('button', { onClick: queueOpening }, 'Queue')
+                  ),
+                  err && React.createElement('div', { className: 'error' }, err)
+                )
+              : React.createElement('div', null,
+                  React.createElement('div', { className: 'muted' }, label),
+                  React.createElement('div', { className: i === 3 ? color : '', style: { fontSize: i === 3 ? '1.6em' : '1.3em', fontWeight: 'bold' } },
+                    (Number(val) || 0).toLocaleString()
+                  )
+                );
+            return React.createElement('div', { key: label }, node);
+          })
+        )
+      );
+    }
+
+    // ───────────────────────── Received (draft first) ─────────────────────────
+    function ReceivedDraftForm({ ym, onDraft }) {
+      const [date, setDate] = useState('');
+      const [qty, setQty] = useState('');
+      const [notes, setNotes] = useState('');
+      const [errors, setErrors] = useState({ date: '', qty: '' });
+
+      const addDraft = () => {
+        const e = { date: '', qty: '' };
+        if (!date) e.date = 'Date is required.';
+        else if (!isDateInMonth(date, ym)) e.date = 'Date must be within the selected month.';
+        if (!isValidNonNegativeNumber(qty, 10000000)) e.qty = 'Liters must be a non-negative number (max 10,000,000).';
+
+        setErrors(e);
+        if (e.date || e.qty) return;
+
+        onDraft({
+          id: `${Date.now()}_${Math.floor(Math.random()*1e6)}`,
+          date,
+          quantity: Number(qty),
+          notes: notes || ''
+        });
+        setDate(''); setQty(''); setNotes('');
+        setErrors({ date: '', qty: '' });
+      };
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'row' },
+          React.createElement('input', {
+            type: 'date',
+            value: date,
+            onChange: e => setDate(e.target.value),
+            className: errors.date ? 'input-error' : ''
+          }),
+          React.createElement('input', {
+            type: 'number',
+            placeholder: 'Liters',
+            value: qty,
+            onChange: e => setQty(e.target.value),
+            className: errors.qty ? 'input-error' : ''
+          }),
+          React.createElement('input', {
+            className: 'flex-1',
+            placeholder: 'Notes / Tanker',
+            value: notes,
+            onChange: e => setNotes(e.target.value)
+          }),
+          React.createElement('button', { onClick: addDraft }, 'Add to Draft')
+        ),
+        (errors.date || errors.qty) && React.createElement('div', { className: 'error' },
+          [errors.date, errors.qty].filter(Boolean).join(' ')
+        )
+      );
+    }
+
+    function ReceivedSummary({ basePath, ym, drafts, removeDraft }) {
+      const [entries, setEntries] = useState([]);
+
+      useEffect(() => {
+        return onValue(ref(db, `${basePath}/received/${ym}`), snap => {
+          const arr = [];
+          snap.exists() && snap.forEach(c => {
+            const v = c.val();
+            arr.push({ id: c.key, ...v, ts: typeof v.ts === 'number' ? v.ts : 0 });
+          });
+          setEntries(arr.sort((a,b) => b.ts - a.ts));
+        });
+      }, [basePath, ym]);
+
+      const savedTotal = entries.reduce((s, e) => s + Number(e.quantity || 0), 0);
+      const draftTotal = (drafts || []).reduce((s, d) => s + Number(d.quantity || 0), 0);
+
+      return React.createElement('div', { style: { marginTop: '16px' } },
+        // Draft
+        React.createElement('div', { className: 'section-subtle' },
+          React.createElement('h4', null, `Draft Received (not saved): ${draftTotal.toLocaleString()} L`),
+          (drafts && drafts.length > 0)
+            ? React.createElement('table', null,
+                React.createElement('thead', null,
+                  React.createElement('tr', null,
+                    React.createElement('th', null, 'Date'),
+                    React.createElement('th', null, 'Liters'),
+                    React.createElement('th', null, 'Notes'),
+                    React.createElement('th', null, '')
+                  )
+                ),
+                React.createElement('tbody', null,
+                  drafts.map(d => React.createElement('tr', { key: d.id },
+                    React.createElement('td', null, d.date),
+                    React.createElement('td', null, Number(d.quantity || 0).toLocaleString()),
+                    React.createElement('td', { className: 'left' }, d.notes || '—'),
+                    React.createElement('td', null,
+                      React.createElement('button', {
+                        className: 'danger',
+                        style: { padding: '4px 8px' },
+                        onClick: () => removeDraft(d.id)
+                      }, 'Remove')
+                    )
+                  ))
+                )
+              )
+            : React.createElement('div', { className: 'muted' }, 'No draft entries.')
+        ),
+
+        // Saved
+        React.createElement('div', { className: 'section-subtle' },
+          React.createElement('h4', null, `Saved Received: ${savedTotal.toLocaleString()} L`),
+          entries.length > 0 && React.createElement('table', null,
+            React.createElement('thead', null,
+              React.createElement('tr', null,
+                React.createElement('th', null, 'Date'),
+                React.createElement('th', null, 'Liters'),
+                React.createElement('th', null, 'Notes'),
+                React.createElement('th', null, '')
+              )
+            ),
+            React.createElement('tbody', null,
+              entries.map(e => React.createElement('tr', { key: e.id },
+                React.createElement('td', null, e.date),
+                React.createElement('td', null, Number(e.quantity || 0).toLocaleString()),
+                React.createElement('td', { className: 'left' }, e.notes || '—'),
+                React.createElement('td', null,
+                  React.createElement('button', {
+                    className: 'danger',
+                    style: { padding: '4px 8px' },
+                    onClick: () => {
+                      if (confirm('Delete this saved received entry?')) {
+                        remove(ref(db, `${basePath}/received/${ym}/${e.id}`));
+                      }
+                    }
+                  }, 'Delete')
+                )
+              ))
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Daily quick entry ─────────────────────────
+    function DailyEntryForm({ basePath, ym, equipments }) {
+      const [date, setDate] = useState('');
+      const [eq, setEq] = useState('');
+      const [liters, setLiters] = useState('');
+      const [eqFilter, setEqFilter] = useState('');
+      const [errors, setErrors] = useState({ date: '', eq: '', liters: '' });
+
+      const filteredEquipments = useMemo(() => {
+        const q = eqFilter.trim().toLowerCase();
+        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
+      }, [equipments, eqFilter]);
+
+      const validate = () => {
+        const e = { date: '', eq: '', liters: '' };
+        if (!date) e.date = 'Date is required.';
+        else if (!isDateInMonth(date, ym)) e.date = 'Date must be within the selected month.';
+        if (!eq) e.eq = 'Select equipment.';
+        if (!isValidNonNegativeNumber(liters, 1000000)) e.liters = 'Liters must be a non-negative number (max 1,000,000).';
+        setErrors(e);
+        return !e.date && !e.eq && !e.liters;
+      };
+
+      const save = async () => {
+        if (!validate()) return;
+        const day = new Date(date).getDate();
+        await update(ref(db, `${basePath}/sheets/${ym}/data/${eq}`), { [day]: Number(liters) });
+        setLiters('');
+      };
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'row' },
+          React.createElement('input', {
+            type: 'date',
+            value: date,
+            onChange: e => setDate(e.target.value),
+            className: errors.date ? 'input-error' : ''
+          }),
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Search equipment…',
+            value: eqFilter,
+            onChange: e => setEqFilter(e.target.value),
+            style: { width: '180px' }
+          }),
+          React.createElement('select', {
+            value: eq,
+            onChange: e => setEq(e.target.value),
+            className: errors.eq ? 'input-error' : ''
+          },
+            React.createElement('option', { value: '' }, 'Select Equipment'),
+            filteredEquipments.map(e => React.createElement('option', { key: e.id || e.name, value: e.name }, e.name))
+          ),
+          React.createElement('input', {
+            type: 'number',
+            placeholder: 'Liters',
+            value: liters,
+            onChange: e => setLiters(e.target.value),
+            className: errors.liters ? 'input-error' : ''
+          }),
+          React.createElement('button', { onClick: save }, 'Save')
+        ),
+        (errors.date || errors.eq || errors.liters) && React.createElement('div', { className: 'error' },
+          [errors.date, errors.eq, errors.liters].filter(Boolean).join(' ')
+        )
+      );
+    }
+
+    // ───────────────────────── Monthly Sheet (draft + queue) ─────────────────────────
+    function MonthlySheet({ basePath, ym, role, equipments, queueUpdate }) {
+      const [data, setData] = useState({});
+      const [draft, setDraft] = useState({});
+      const [rowFilter, setRowFilter] = useState('');
+
+      useEffect(() => {
+        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => {
+          const live = s.exists() ? s.val() : {};
+          setData(live);
+          setDraft(prev => {
+            const merged = { ...live };
+            for (const eqName of Object.keys(prev)) {
+              merged[eqName] = { ...(live[eqName] || {}), ...(prev[eqName] || {}) };
+            }
+            return merged;
+          });
+        });
+      }, [basePath, ym]);
+
+      const setCellDraft = (eqName, day, val) => {
+        const v = val === '' ? '' : val; // keep raw for validation
+        setDraft(d => ({ ...d, [eqName]: { ...(d[eqName] || {}), [day]: v } }));
+        if (isValidNonNegativeNumber(v, 1000000)) {
+          queueUpdate(`${basePath}/sheets/${ym}/data/${eqName}/${day}`, Number(v));
+        } else {
+          queueUpdate(`${basePath}/sheets/${ym}/data/${eqName}/${day}`, undefined);
+        }
+      };
+
+      const rowTotalDraft = eqName =>
+        Object.values(draft[eqName] || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+
+      const days = daysInMonth(ym);
+
+      const list = useMemo(() => {
+        const q = rowFilter.trim().toLowerCase();
+        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
+      }, [equipments, rowFilter]);
+
+      const colTotalDraft = day => list.reduce((sum, eq) => sum + Number((draft[eq.name] || {})[day] || 0), 0);
+      const grandDraft = list.reduce((sum, eq) => sum + rowTotalDraft(eq.name), 0);
+
+      const addEquipment = async () => {
+        const name = (prompt('Equipment name') || '').trim();
+        if (!name) return;
+        const exists = (equipments || []).some(e => (e.name || '').trim().toLowerCase() === name.toLowerCase());
+        if (exists) return alert('Equipment already exists');
+
+        // ✅ Use push() to create unique key
+        const listRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+        const newRef = push(listRef);
+        await set(newRef, { name });
+
+        // Seed draft so the row appears instantly
+        setDraft(d => ({ ...d, [name]: { ...(d[name] || {}) } }));
+      };
+
+      return React.createElement('div', null,
+        role === 'admin' && React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
+          React.createElement('button', { onClick: addEquipment }, '+ Add Equipment'),
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Search equipment…',
+            value: rowFilter,
+            onChange: e => setRowFilter(e.target.value),
+            className: 'flex-1'
+          })
+        ),
+        React.createElement('div', { style: { overflowX: 'auto', maxHeight: '65vh' } },
+          React.createElement('table', null,
+            React.createElement('thead', null,
+              React.createElement('tr', null,
+                React.createElement('th', { className: 'left' }, 'Equipment'),
+                ...Array.from({ length: days }, (_, i) => React.createElement('th', { key: i }, i + 1)),
+                React.createElement('th', null, 'Total')
+              )
+            ),
+            React.createElement('tbody', null,
+              list.map(eq => React.createElement('tr', { key: eq.id || eq.name },
+                React.createElement('td', { className: 'left' }, eq.name),
+                ...Array.from({ length: days }, (_, i) => {
+                  const d = i + 1;
+                  const raw = (draft[eq.name] || {})[d];
+                  const isErr = raw !== '' && !isValidNonNegativeNumber(raw, 1000000);
+                  const display = (raw === 0 || raw) ? raw : '';
+                  const changed = ((data[eq.name] || {})[d] || 0) !== (Number(display) || 0);
+                  return React.createElement('td', { key: d },
+                    React.createElement('input', {
+                      type: 'number',
+                      value: display,
+                      style: { width: '70px' },
+                      className: isErr ? 'input-error' : '',
+                      onChange: e => setCellDraft(eq.name, d, e.target.value)
+                    }),
+                    isErr ? React.createElement('div', { className: 'error' }, '0–1,000,000') :
+                    changed ? React.createElement('span', { className: 'unsaved-dot', title: 'Unsaved' }) : null
+                  );
+                }),
+                React.createElement('td', null, rowTotalDraft(eq.name))
+              )),
+              React.createElement('tr', { style: { fontWeight: 'bold' } },
+                React.createElement('td', { className: 'left' }, 'Daily Total'),
+                ...Array.from({ length: days }, (_, i) => React.createElement('td', { key: i }, colTotalDraft(i + 1))),
+                React.createElement('td', null, grandDraft)
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Per-Equipment Report ─────────────────────────
+    function PerEquipmentReport({ basePath, ym, equipments }) {
+      const [selected, setSelected] = useState('');
+      const [data, setData] = useState({});
+
+      useEffect(() => {
+        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => setData(s.exists() ? s.val() : {}));
+      }, [basePath, ym]);
+
+      const row = data[selected] || {};
+      const total = Object.values(row).reduce((a, b) => a + Number(b), 0);
+      const days = daysInMonth(ym);
+
+      return React.createElement('div', null,
+        React.createElement('select', { value: selected, onChange: e => setSelected(e.target.value) },
+          React.createElement('option', { value: '' }, 'Select Equipment'),
+          equipments.map(e => React.createElement('option', { key: e.id || e.name, value: e.name }, e.name))
+        ),
+        selected && React.createElement('table', { style: { marginTop: '16px' } },
+          React.createElement('thead', null,
+            React.createElement('tr', null,
+              React.createElement('th', null, 'Day'),
+              React.createElement('th', null, 'Liters')
+            )
+          ),
+          React.createElement('tbody', null,
+            ...Array.from({ length: days }, (_, i) => {
+              const d = i + 1;
+              return React.createElement('tr', { key: d },
+                React.createElement('td', null, d),
+                React.createElement('td', null, row[d] || 0)
+              );
+            }),
+            React.createElement('tr', { style: { fontWeight: 'bold' } },
+              React.createElement('td', null, 'Total'),
+              React.createElement('td', null, total)
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Equipment Manager ─────────────────────────
+    function EquipmentManager({ basePath, ym, equipments, setEquipments }) {
+      const [newName, setNewName] = useState('');
+      const [search, setSearch] = useState('');
+
+      const nameExistsLocal = (name) =>
+        (equipments || []).some(e => (e.name || '').trim().toLowerCase() === (name || '').trim().toLowerCase());
+
+      const deleteEquipment = async (id, name) => {
+        if (!confirm(`Delete equipment "${name}"?\nThis will also remove its monthly consumption row.`)) return;
+
+        await remove(ref(db, `${basePath}/sheets/${ym}/equipments/${id}`));
+        await remove(ref(db, `${basePath}/sheets/${ym}/data/${name}`)).catch(() => {});
+        setEquipments(prev => sortByName((prev || []).filter(e => e.id !== id)));
+      };
+
+      const filtered = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        return sortByName((equipments || [])
+          .filter(e => !q || (e.name || '').toLowerCase().includes(q)));
+      }, [equipments, search]);
+
+      const addEquipment = async () => {
+        const name = (newName || '').trim();
+        if (!name) return alert('Enter equipment name');
+        if (nameExistsLocal(name)) return alert('Equipment already exists');
+
+        const listRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+        const newRef = push(listRef);       // ✅ unique key
+        await set(newRef, { name });
+
+        setNewName('');
+        setEquipments(prev => sortByName([...(prev || []), { id: newRef.key, name }]));
+      };
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'New equipment name',
+            value: newName,
+            onChange: e => setNewName(e.target.value),
+            className: 'flex-1'
+          }),
+          React.createElement('button', { onClick: addEquipment }, 'Add Equipment')
+        ),
+
+        React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Search equipment…',
+            value: search,
+            onChange: e => setSearch(e.target.value),
+            className: 'flex-1'
+          })
+        ),
+
+        React.createElement('div', { className: 'section-subtle' },
+          filtered.length === 0
+            ? React.createElement('div', { className: 'muted' }, 'No equipments found.')
+            : React.createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0 } },
+                filtered.map(e =>
+                  React.createElement('li', {
+                    key: e.id, /* important: use id */
+                    className: 'left',
+                    style: {
+                      padding: '6px 0',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '8px',
+                      borderBottom: '1px solid #1f2937'
+                    }
+                  },
+                    React.createElement('span', null, e.name),
+                    React.createElement('button', {
+                      className: 'danger',
+                      style: { padding: '4px 10px' },
+                      onClick: () => deleteEquipment(e.id, e.name)
+                    }, 'Delete')
+                  )
+                )
+              )
+        )
+      );
+    }
+
+ // ───────────────────────── Import (push IDs + progress) ─────────────────────────
+async function importCSV(basePath, ym, setEquipments, setImportProgress) {
+  const file = document.getElementById('importFile')?.files?.[0];
+  if (!file) return alert('Select CSV file');
+
+  const updateProgress = (patch) =>
+    setImportProgress(prev => ({ ...prev, ...patch }));
+
+  updateProgress({ running: true, phase: 'Reading file…', processed: 0, total: 0, cells: 0, errors: 0 });
+
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const text = String(e.target.result || '');
+      const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      const lines = rawLines.map(l => l.trim()).filter(l => l.length > 0);
+      if (lines.length < 2) {
+        updateProgress({ running: false, phase: 'Invalid CSV (no data rows).' });
+        return alert('Invalid CSV (no data rows)');
+      }
+
+      const header = splitCSVLine(lines[0]).map(h => h.trim());
+      const lastHeader = (header[header.length - 1] || '').toLowerCase();
+      const hasTotal = lastHeader === 'total';
+      const monthDays = daysInMonth(ym);
+      const headerDayCount = (hasTotal ? header.length - 2 : header.length - 1);
+      const dayCols = Math.min(headerDayCount, monthDays);
+
+      updateProgress({ phase: 'Scanning existing equipments…' });
+      const eqRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+      const dataRoot = `${basePath}/sheets/${ym}/data`;
+
+      // Build name->id and id->name maps once
+      const exSnap = await get(eqRef);
+      const nameToId = {};
+      const idToName = {};
+      if (exSnap.exists()) {
+        exSnap.forEach(c => {
+          const v = c.val() || {};
+          const storedName = (v.name || '').trim();
+          if (storedName) {
+            nameToId[storedName.toLowerCase()] = c.key;
+            idToName[c.key] = storedName;
+          }
+        });
+      }
+
+      const totalRows = lines.length - 1;
+      updateProgress({ phase: 'Parsing CSV rows…', total: totalRows, processed: 0 });
+
+      const BATCH_SIZE = 4000;
+      let batch = {};
+      let batchCells = 0;
+
+      let processed = 0;
+      let globalCells = 0;
+      let errorCount = 0;
+      const addedNames = new Set();
+
+      async function flushBatch() {
+        if (Object.keys(batch).length === 0) return;
+        await update(ref(db), batch);
+        batch = {};
+        batchCells = 0;
+      }
+
+      for (let i = 1; i < lines.length; i++) {
+        try {
+          const cells = splitCSVLine(lines[i]);
+          if (cells.length < 1) { processed++; updateProgress({ processed, cells: globalCells }); continue; }
+
+          const rawName = cells[0];
+          const name = (rawName || '').trim();
+          if (!name) { processed++; updateProgress({ processed, cells: globalCells }); continue; }
+
+          // normalize name and check existing equipment id
+          const norm = name.toLowerCase();
+          let id = nameToId[norm];
+
+          // First scan day values to know if there are any positive values
+          let rowHasValues = false;
+          const dayValues = new Array(dayCols + 1); // 1-based index for convenience
+          for (let d = 1; d <= dayCols; d++) {
+            const colIndex = d;
+            const v = toNum(cells[colIndex]);
+            dayValues[d] = v;
+            if (v > 0) rowHasValues = true;
+          }
+
+          // If equipment exists: update its values (only non-zero cells)
+          if (id) {
+            // use stored name for data path to keep consistency
+            const storedName = idToName[id] || name;
+            for (let d = 1; d <= dayCols; d++) {
+              const v = dayValues[d];
+              if (v > 0) {
+                batch[`${dataRoot}/${id}/${d}`] = v; // use id-keyed data
+                batchCells++;
+                globalCells++;
+              }
+              if (batchCells >= BATCH_SIZE) {
+                updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
+                await flushBatch();
+                updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
+              }
+            }
+          } else {
+            // Equipment does not exist yet.
+            // Only create the equipment and import its values if the row actually has values.
+            if (rowHasValues) {
+              const newRef = push(eqRef);     // ✅ unique key
+              await set(newRef, { name });
+              id = newRef.key;
+              nameToId[norm] = id;
+              idToName[id] = name;
+              addedNames.add(name);
+
+              for (let d = 1; d <= dayCols; d++) {
+                const v = dayValues[d];
+                if (v > 0) {
+                  batch[`${dataRoot}/${id}/${d}`] = v; // data keyed by id for new equipment
+                  batchCells++;
+                  globalCells++;
+                }
+                if (batchCells >= BATCH_SIZE) {
+                  updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
+                  await flushBatch();
+                  updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
+                }
+              }
+            } else {
+              // No values and equipment doesn't exist: skip entirely (do not create empty equipment)
+            }
+          }
+        } catch (err) {
+          errorCount++;
+        } finally {
+          processed++;
+          if (processed % 10 === 0 || processed === totalRows) {
+            updateProgress({ processed, cells: globalCells, errors: errorCount });
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
+      }
+
+      if (batchCells > 0) {
+        updateProgress({ phase: `Finalizing… (${globalCells} cells)` });
+        await flushBatch();
+      }
+
+      // Refresh equipments from DB and show all
+      updateProgress({ phase: 'Refreshing equipments…' });
+      const snap = await get(eqRef);
+      const arr = [];
+      snap.exists() && snap.forEach(c => arr.push({ id: c.key, ...(c.val() || {}) }));
+      setEquipments(sortByName(arr));
+
+      updateProgress({
+        running: false,
+        phase: `Import finished. Added: ${addedNames.size}, Cells written: ${globalCells}, Errors: ${errorCount}`,
+        errors: errorCount
+      });
+      alert(`Import finished.\nAdded: ${addedNames.size}\nCells written: ${globalCells}\nErrors: ${errorCount}`);
+    } catch (err) {
+      updateProgress({ running: false, phase: `Import failed: ${err?.message || String(err)}` });
+      alert(`Import failed: ${err?.message || String(err)}`);
+    }
+  };
+  reader.readAsText(file);
+}
+
+    // ───────────────────────── Export CSV ─────────────────────────
+async function exportCSV(basePath, ym, company, site) {
+  const days = daysInMonth(ym);
+
+  // fetch equipments and data in parallel
+  const [eqSnap, dataSnap] = await Promise.all([
+    get(ref(db, `${basePath}/sheets/${ym}/equipments`)),
+    get(ref(db, `${basePath}/sheets/${ym}/data`))
+  ]);
+
+  // build equipments array in the same order as stored (page order)
+  const eqs = [];
+  eqSnap.exists() && eqSnap.forEach(c => eqs.push({ id: c.key, ...(c.val() || {}) }));
+
+  // data may be keyed by equipment id (preferred) or by equipment name (legacy)
+  const data = dataSnap.exists() ? dataSnap.val() : {};
+
+  // helper to safely escape CSV fields
+  function escapeCSVField(v) {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    // escape double quotes by doubling them, wrap field in quotes if it contains comma, quote or newline
+    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  // header: Equipment,1,2,...,N,Total
+  let csv = 'Equipment,' + Array.from({ length: days }, (_, i) => i + 1).join(',') + ',Total\n';
+
+  // iterate equipments as shown in the web app (includes equipments with no data)
+  for (const eq of eqs) {
+    // prefer id-keyed data; fall back to name-keyed data for backward compatibility
+    const rowById = data && data[eq.id];
+    const rowByName = data && data[eq.name];
+    const row = rowById || rowByName || {};
+
+    let tot = 0;
+    const vals = [];
+    for (let d = 1; d <= days; d++) {
+      const v = Number(row[d] || 0);
+      tot += v;
+      vals.push(v);
+    }
+
+    csv += `${escapeCSVField(eq.name)},${vals.join(',')},${tot}\n`;
+  }
+
+  // If there are any data entries that don't have a corresponding equipment record,
+  // include them as well so the exported sheet is complete.
+  // (This covers cases where data exists but equipments list is missing entries.)
+  const knownKeys = new Set(eqs.map(e => e.id).concat(eqs.map(e => (e.name || '').toLowerCase())));
+  if (data && typeof data === 'object') {
+    for (const key of Object.keys(data)) {
+      // skip if key matches an equipment id or name already exported
+      const isIdExported = eqs.some(e => e.id === key);
+      const isNameExported = eqs.some(e => (e.name || '').toLowerCase() === (key || '').toLowerCase());
+      if (isIdExported || isNameExported) continue;
+
+      // treat this key as an extra row (key might be id or name)
+      const row = data[key] || {};
+      let tot = 0;
+      const vals = [];
+      for (let d = 1; d <= days; d++) {
+        const v = Number(row[d] || 0);
+        tot += v;
+        vals.push(v);
+      }
+      // use the key as the label if no name available
+      csv += `${escapeCSVField(key)},${vals.join(',')},${tot}\n`;
+    }
+  }
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${company || 'company'}-${site || 'site'}-${ym}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+    // ───────────────────────── Render ─────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
