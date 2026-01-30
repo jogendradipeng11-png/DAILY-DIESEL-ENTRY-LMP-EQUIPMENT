@@ -40,7 +40,7 @@
 <body>
   <div id="root"></div>
 
-  <!-- React UMD (development). For production use .production.min.js -->
+  <!-- React UMD -->
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
 
@@ -58,6 +58,7 @@
       ref, set, onValue, update, get, push, remove, serverTimestamp
     } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
 
+    // ✅ Your Firebase config (unchanged)
     const firebaseConfig = {
       apiKey: "AIzaSyB4WcFUhQLHYSU6lecY9xWAQYjApNp9LG4",
       authDomain: "studio-6256088054-e3eee.firebaseapp.com",
@@ -88,7 +89,10 @@
       const [y, m] = ym.split('-').map(Number);
       return d.getFullYear() === y && (d.getMonth() + 1) === m;
     }
-    const sortByName = arr => [...(arr || [])].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    function daysInMonth(ym) {
+      const [y, m] = ym.split('-').map(Number);
+      return new Date(y, m, 0).getDate();
+    }
     const safeId = (suffix='') => `${Date.now()}_${Math.floor(Math.random()*1e6)}${suffix ? '_' + suffix : ''}`;
 
     // CSV helpers
@@ -101,47 +105,65 @@
         if (ch === '"') {
           if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
           else { inQuotes = !inQuotes; }
-        } else if (ch === ',' && !inQuotes) { result.push(cur); cur = ''; }
-        else { cur += ch; }
+        } else if (ch === ',' && !inQuotes) {
+          result.push(cur); cur = '';
+        } else {
+          cur += ch;
+        }
       }
       result.push(cur);
       return result;
-    }
-    const normName = (name) => (name || '').trim();
-    const normKey  = (name) => normName(name).toLowerCase();
-    function toNum(val) {
-      if (val === null || val === undefined) return 0;
-      const s = String(val).trim().replace(/\r/g, '');
-      if (s === '') return 0;
-      const n = Number(s);
-      return Number.isFinite(n) ? n : 0;
     }
 
     // ───────────────────────── App ─────────────────────────
     function App() {
       const [user, setUser] = useState(null);
+
+      // profile
       const [role, setRole] = useState('staff');
       const [company, setCompany] = useState('');
       const [site, setSite] = useState('');
+      const [profileLoading, setProfileLoading] = useState(false);
+      const [profileError, setProfileError] = useState('');
 
       useEffect(() => {
         const unsub = onAuthStateChanged(auth, u => {
           setUser(u);
-          if (u) {
-            onValue(ref(db, `users/${u.uid}`), snap => {
+          setProfileError('');
+
+          if (!u) {
+            setRole('staff'); setCompany(''); setSite('');
+            setProfileLoading(false);
+            return;
+          }
+
+          setProfileLoading(true);
+
+          const userRef = ref(db, `users/${u.uid}`);
+          const off = onValue(userRef,
+            snap => {
               if (snap.exists()) {
-                const v = snap.val();
+                const v = snap.val() || {};
                 setRole(v.role || 'staff');
                 setCompany(v.company || 'LMP');
                 setSite(v.site || 'Jafurah');
               } else {
-                // Keeping your prototype default (first-time profile)
-                set(ref(db, `users/${u.uid}`), { email: u.email, role: 'admin', company: 'LMP', site: 'Jafurah' });
+                // first-time profile
+                set(userRef, { email: u.email, role: 'admin', company: 'LMP', site: 'Jafurah' });
                 setRole('admin'); setCompany('LMP'); setSite('Jafurah');
               }
-            });
-          }
+              setProfileLoading(false);
+            },
+            err => {
+              console.error("Profile read error:", err);
+              setProfileError(err?.message || String(err));
+              setProfileLoading(false);
+            }
+          );
+
+          return () => off;
         });
+
         return unsub;
       }, []);
 
@@ -149,7 +171,12 @@
         React.createElement('header', null, '⛽ LMP Diesel Enterprise'),
         React.createElement('div', { className: 'container' },
           !user && React.createElement(AuthForm),
-          user && React.createElement(Dashboard, { user, role, company, site, setCompany, setSite })
+          user && profileLoading && React.createElement('div', { className: 'card' }, 'Loading profile...'),
+          user && profileError && React.createElement('div', { className: 'card' },
+            React.createElement('div', { className: 'flash error' }, `Profile Error: ${profileError}`)
+          ),
+          user && !profileLoading && !profileError && company && site &&
+            React.createElement(Dashboard, { user, role, company, site, setCompany, setSite })
         )
       );
     }
@@ -218,55 +245,67 @@
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       });
       const [view, setView] = useState('sheet');
-      const basePath = `companies/${company}/sites/${site}/users/${user.uid}`;
 
-      // Equipments: each { id (Firebase key), name }
+      // ✅ basePath: consistent everywhere
+      const basePath = useMemo(() => {
+        return `companies/${company}/sites/${site}/users/${user.uid}`;
+      }, [company, site, user.uid]);
+
       const [equipments, setEquipments] = useState([]);
 
-      // Pending path->value updates (opening + sheet cells)
+      // pending multi-path updates
       const [pending, setPending] = useState({});
-      // Draft received entries
       const [receivedDrafts, setReceivedDrafts] = useState([]);
-      // Import progress & flash
+
       const [importProgress, setImportProgress] = useState({ running: false, phase: '', processed: 0, total: 0, cells: 0, errors: 0 });
       const [flash, setFlash] = useState(null);
 
       const showFlash = (type, text) => {
         setFlash({ type, text });
-        setTimeout(() => setFlash(null), 3000);
+        setTimeout(() => setFlash(null), 3500);
       };
 
-      // Subscribe equipments (read Firebase key as id)
+      // ✅ Equipments subscription: sort by CSV order (order), fallback by name
       useEffect(() => {
         const eqRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
-        const unsub = onValue(eqRef, snap => {
+        return onValue(eqRef, snap => {
           const arr = [];
           if (snap.exists()) {
             snap.forEach(c => {
               const v = c.val() || {};
-              arr.push({ id: c.key, name: v.name || '' });
+              arr.push({ id: c.key, name: v.name || '', order: v.order });
             });
           }
-          setEquipments(sortByName(arr));
+          arr.sort((a,b) => {
+            const ao = (a.order ?? 999999999);
+            const bo = (b.order ?? 999999999);
+            if (ao !== bo) return ao - bo;
+            return (a.name || '').localeCompare(b.name || '');
+          });
+          setEquipments(arr);
+        }, err => {
+          console.error("Equipments read failed:", err);
+          showFlash('error', err?.message || String(err));
         });
-        return unsub;
       }, [basePath, ym]);
 
       const queueUpdate = (path, value) => {
         setPending(prev => {
           const next = { ...prev };
-          if (value === undefined) delete next[path]; else next[path] = value;
+          if (value === undefined) delete next[path];
+          else next[path] = value;
           return next;
         });
       };
 
+      const hasPending = (path) => Boolean(pending[path]);
       const pendingCount = Object.keys(pending).length + receivedDrafts.length;
 
       const saveAll = async () => {
         const pathCount = Object.keys(pending).length;
         const draftsCount = receivedDrafts.length;
 
-        // Guard invalid numbers
+        // validate pending numeric values
         for (const [p, v] of Object.entries(pending)) {
           if (typeof v === 'number' && (!Number.isFinite(v) || v < 0)) {
             alert('There are invalid numeric values. Please fix highlighted fields before saving.');
@@ -281,6 +320,7 @@
         try {
           const updates = { ...pending };
           const recvRoot = `${basePath}/received/${ym}`;
+
           receivedDrafts.forEach((d, i) => {
             const key = safeId(i);
             updates[`${recvRoot}/${key}`] = {
@@ -296,22 +336,21 @@
           setReceivedDrafts([]);
           showFlash('success', `Saved ${pathCount} change(s) and ${draftsCount} received entr${draftsCount === 1 ? 'y' : 'ies'}.`);
         } catch (e) {
+          console.error("SaveAll failed:", e);
           showFlash('error', `Save failed: ${e?.message || e}`);
           alert('Save failed: ' + (e?.message || e));
         }
       };
 
       const discardAll = () => {
-        const pathCount = Object.keys(pending).length;
-        const draftsCount = receivedDrafts.length;
-        const total = pathCount + draftsCount;
+        const total = Object.keys(pending).length + receivedDrafts.length;
         if (total === 0) return;
 
         const ok = confirm(
           `Discard unsaved changes?\n\n` +
-          `• Pending cell/opening changes: ${pathCount}\n` +
-          `• Draft received entries: ${draftsCount}\n\n` +
-          `This will revert to the last saved data.`
+          `• Pending cell/opening changes: ${Object.keys(pending).length}\n` +
+          `• Draft received entries: ${receivedDrafts.length}\n\n` +
+          `This will revert to last saved data.`
         );
         if (!ok) return;
 
@@ -326,12 +365,22 @@
           React.createElement('div', null, `Role: ${role}`),
           React.createElement('button', { onClick: () => signOut(auth) }, 'Logout'),
           React.createElement('span', { className: 'muted' }, ' | Company: '),
-          React.createElement('input', { value: company, onChange: e => setCompany(e.target.value), disabled: role !== 'admin', style: { width: '140px' } }),
+          React.createElement('input', {
+            value: company,
+            onChange: e => setCompany(e.target.value),
+            disabled: role !== 'admin',
+            style: { width: '140px' }
+          }),
           React.createElement('span', { className: 'muted' }, ' Site: '),
-          React.createElement('input', { value: site, onChange: e => setSite(e.target.value), disabled: role !== 'admin', style: { width: '140px' } })
+          React.createElement('input', {
+            value: site,
+            onChange: e => setSite(e.target.value),
+            disabled: role !== 'admin',
+            style: { width: '140px' }
+          })
         ),
 
-        React.createElement(MonthlyBalanceSummary, { basePath, ym, queueUpdate, hasPending: (path) => Boolean(pending[path]) }),
+        React.createElement(MonthlyBalanceSummary, { basePath, ym, queueUpdate, hasPending }),
 
         React.createElement('div', { className: 'card row' },
           React.createElement('h3', null, 'Month'),
@@ -370,8 +419,7 @@
             React.createElement('button', {
               onClick: () => importCSV(basePath, ym, setEquipments, setImportProgress),
               disabled: importProgress.running
-            }, importProgress.running ? 'Importing…' : 'Import'),
-            React.createElement('button', { onClick: () => window.location.reload() }, 'Refresh')
+            }, importProgress.running ? 'Importing…' : 'Import')
           ),
           (importProgress.running || importProgress.phase) && React.createElement('div', { className: 'section-subtle' },
             React.createElement('div', { className: 'muted' }, importProgress.phase || 'Ready'),
@@ -386,12 +434,12 @@
 
         React.createElement('div', { className: 'card' },
           React.createElement('h3', null, 'Equipments'),
-          React.createElement(EquipmentManager, { basePath, ym, equipments, setEquipments })
+          React.createElement(EquipmentManager, { basePath, ym, role, equipments })
         ),
 
         view === 'sheet' && React.createElement('div', { className: 'card' },
           React.createElement('h3', null, `Consumption Sheet – ${company} / ${site}`),
-          React.createElement(MonthlySheet, { basePath, ym, role, equipments, queueUpdate })
+          React.createElement(MonthlySheet, { basePath, ym, role, equipments, queueUpdate, hasPending })
         ),
 
         view === 'report' && React.createElement('div', { className: 'card' },
@@ -400,11 +448,7 @@
       );
     }
 
-    // ───────────────────────── Month & Totals helpers ─────────────────────────
-    function daysInMonth(ym) {
-      const [y, m] = ym.split('-').map(Number);
-      return new Date(y, m, 0).getDate();
-    }
+    // ───────────────────────── Balance & Totals ─────────────────────────
     async function getMonthlyTotals(basePath, ym) {
       const [receivedSnap, dataSnap, openingSnap] = await Promise.all([
         get(ref(db, `${basePath}/received/${ym}`)),
@@ -417,15 +461,16 @@
 
       let consumed = 0;
       if (dataSnap.exists()) {
-        const data = dataSnap.val();
-        Object.values(data).forEach(obj => Object.values(obj).forEach(v => consumed += Number(v || 0)));
+        const data = dataSnap.val() || {};
+        Object.values(data).forEach(row => {
+          Object.values(row || {}).forEach(v => consumed += Number(v || 0));
+        });
       }
 
       const opening = Number(openingSnap.val() || 0);
       return { opening, received, consumed, closing: opening + received - consumed };
     }
 
-    // ───────────────────────── Balance & Opening (queued) ─────────────────────────
     function MonthlyBalanceSummary({ basePath, ym, queueUpdate, hasPending }) {
       const [totals, setTotals] = useState({ opening: 0, received: 0, consumed: 0, closing: 0 });
       const [loading, setLoading] = useState(true);
@@ -438,6 +483,9 @@
           setTotals(t);
           setOpeningDraft(t.opening);
           setErr('');
+          setLoading(false);
+        }).catch(e => {
+          console.error("Totals failed:", e);
           setLoading(false);
         });
       }, [basePath, ym]);
@@ -488,7 +536,283 @@
       );
     }
 
-    // ───────────────────────── Received (draft first) ─────────────────────────
+    // ───────────────────────── Equipments Manager ─────────────────────────
+    function EquipmentManager({ basePath, ym, role, equipments }) {
+      const [newName, setNewName] = useState('');
+
+      const addEquipment = async () => {
+        if (role !== 'admin') return;
+        const name = (newName || '').trim();
+        if (!name) return alert('Enter equipment name');
+
+        const exists = (equipments || []).some(e => (e.name || '').trim().toLowerCase() === name.toLowerCase());
+        if (exists) return alert('Equipment already exists');
+
+        const listRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+        const newRef = push(listRef);
+        const maxOrder = (equipments || []).reduce((m, e) => Math.max(m, Number(e.order ?? 0)), 0);
+
+        await set(newRef, { name, order: maxOrder + 1 });
+        setNewName('');
+      };
+
+      const deleteEquipment = async (eq) => {
+        if (role !== 'admin') return;
+        if (!confirm(`Delete "${eq.name}"?\n\nThis also deletes its data for ${ym}.`)) return;
+        await remove(ref(db, `${basePath}/sheets/${ym}/equipments/${eq.id}`));
+        await remove(ref(db, `${basePath}/sheets/${ym}/data/${eq.id}`));
+      };
+
+      return React.createElement('div', null,
+        role === 'admin' && React.createElement('div', { className: 'row' },
+          React.createElement('input', {
+            className: 'flex-1',
+            placeholder: 'New equipment name',
+            value: newName,
+            onChange: e => setNewName(e.target.value)
+          }),
+          React.createElement('button', { onClick: addEquipment }, '+ Add')
+        ),
+        React.createElement('table', { style: { marginTop: '10px' } },
+          React.createElement('thead', null,
+            React.createElement('tr', null,
+              React.createElement('th', { className: 'left' }, 'Equipment'),
+              React.createElement('th', null, 'Order'),
+              React.createElement('th', null, 'Action')
+            )
+          ),
+          React.createElement('tbody', null,
+            (equipments || []).map(eq =>
+              React.createElement('tr', { key: eq.id },
+                React.createElement('td', { className: 'left' }, eq.name),
+                React.createElement('td', null, eq.order ?? ''),
+                React.createElement('td', null,
+                  role === 'admin'
+                    ? React.createElement('button', { className: 'danger', onClick: () => deleteEquipment(eq) }, 'Delete')
+                    : '—'
+                )
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Daily Entry (uses ID) ─────────────────────────
+    function DailyEntryForm({ basePath, ym, equipments }) {
+      const [date, setDate] = useState('');
+      const [eqId, setEqId] = useState('');
+      const [liters, setLiters] = useState('');
+      const [eqFilter, setEqFilter] = useState('');
+      const [errors, setErrors] = useState({ date: '', eq: '', liters: '' });
+
+      const filteredEquipments = useMemo(() => {
+        const q = eqFilter.trim().toLowerCase();
+        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
+      }, [equipments, eqFilter]);
+
+      const validate = () => {
+        const e = { date: '', eq: '', liters: '' };
+        if (!date) e.date = 'Date is required.';
+        else if (!isDateInMonth(date, ym)) e.date = 'Date must be within selected month.';
+        if (!eqId) e.eq = 'Select equipment.';
+        if (!isValidNonNegativeNumber(liters, 1000000)) e.liters = 'Liters must be 0–1,000,000';
+        setErrors(e);
+        return !e.date && !e.eq && !e.liters;
+      };
+
+      const save = async () => {
+        if (!validate()) return;
+        const day = new Date(date).getDate();
+        await update(ref(db, `${basePath}/sheets/${ym}/data/${eqId}`), { [day]: Number(liters) });
+        setLiters('');
+      };
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'row' },
+          React.createElement('input', {
+            type: 'date',
+            value: date,
+            onChange: e => setDate(e.target.value),
+            className: errors.date ? 'input-error' : ''
+          }),
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Search equipment…',
+            value: eqFilter,
+            onChange: e => setEqFilter(e.target.value),
+            style: { width: '180px' }
+          }),
+          React.createElement('select', {
+            value: eqId,
+            onChange: e => setEqId(e.target.value),
+            className: errors.eq ? 'input-error' : ''
+          },
+            React.createElement('option', { value: '' }, 'Select Equipment'),
+            filteredEquipments.map(e =>
+              React.createElement('option', { key: e.id, value: e.id }, e.name)
+            )
+          ),
+          React.createElement('input', {
+            type: 'number',
+            placeholder: 'Liters',
+            value: liters,
+            onChange: e => setLiters(e.target.value),
+            className: errors.liters ? 'input-error' : ''
+          }),
+          React.createElement('button', { onClick: save }, 'Save')
+        ),
+        (errors.date || errors.eq || errors.liters) && React.createElement('div', { className: 'error' },
+          [errors.date, errors.eq, errors.liters].filter(Boolean).join(' ')
+        )
+      );
+    }
+
+    // ───────────────────────── Monthly Sheet (uses ID) ─────────────────────────
+    function MonthlySheet({ basePath, ym, equipments, queueUpdate, hasPending }) {
+      const [data, setData] = useState({});
+      const [draft, setDraft] = useState({});
+      const [rowFilter, setRowFilter] = useState('');
+
+      useEffect(() => {
+        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => {
+          const live = s.exists() ? (s.val() || {}) : {};
+          setData(live);
+
+          // merge drafts on top of live
+          setDraft(prev => {
+            const merged = { ...live };
+            for (const eqId of Object.keys(prev)) {
+              merged[eqId] = { ...(live[eqId] || {}), ...(prev[eqId] || {}) };
+            }
+            return merged;
+          });
+        });
+      }, [basePath, ym]);
+
+      const list = useMemo(() => {
+        const q = rowFilter.trim().toLowerCase();
+        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
+      }, [equipments, rowFilter]);
+
+      const days = daysInMonth(ym);
+
+      const setCellDraft = (eqId, day, val) => {
+        const v = val === '' ? '' : val;
+        setDraft(d => ({ ...d, [eqId]: { ...(d[eqId] || {}), [day]: v } }));
+
+        const path = `${basePath}/sheets/${ym}/data/${eqId}/${day}`;
+        if (isValidNonNegativeNumber(v, 1000000)) queueUpdate(path, Number(v));
+        else queueUpdate(path, undefined);
+      };
+
+      const rowTotalDraft = (eqId) =>
+        Object.values(draft[eqId] || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+
+      const colTotalDraft = (day) =>
+        list.reduce((sum, eq) => sum + Number((draft[eq.id] || {})[day] || 0), 0);
+
+      const grandDraft = list.reduce((sum, eq) => sum + rowTotalDraft(eq.id), 0);
+
+      return React.createElement('div', null,
+        React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Search equipment…',
+            value: rowFilter,
+            onChange: e => setRowFilter(e.target.value),
+            className: 'flex-1'
+          })
+        ),
+        React.createElement('div', { style: { overflowX: 'auto', maxHeight: '65vh' } },
+          React.createElement('table', null,
+            React.createElement('thead', null,
+              React.createElement('tr', null,
+                React.createElement('th', { className: 'left' }, 'Equipment'),
+                ...Array.from({ length: days }, (_, i) => React.createElement('th', { key: i }, i + 1)),
+                React.createElement('th', null, 'Total')
+              )
+            ),
+            React.createElement('tbody', null,
+              list.map(eq => React.createElement('tr', { key: eq.id },
+                React.createElement('td', { className: 'left' }, eq.name),
+                ...Array.from({ length: days }, (_, i) => {
+                  const day = i + 1;
+                  const raw = (draft[eq.id] || {})[day];
+                  const display = (raw === 0 || raw) ? raw : '';
+                  const isErr = display !== '' && !isValidNonNegativeNumber(display, 1000000);
+
+                  const path = `${basePath}/sheets/${ym}/data/${eq.id}/${day}`;
+                  const pendingDot = hasPending(path);
+
+                  return React.createElement('td', { key: day },
+                    React.createElement('input', {
+                      type: 'number',
+                      value: display,
+                      style: { width: '70px' },
+                      className: isErr ? 'input-error' : '',
+                      onChange: e => setCellDraft(eq.id, day, e.target.value)
+                    }),
+                    isErr ? React.createElement('div', { className: 'error' }, '0–1,000,000')
+                         : pendingDot ? React.createElement('span', { className: 'unsaved-dot', title: 'Queued (Save All)' }) : null
+                  );
+                }),
+                React.createElement('td', null, rowTotalDraft(eq.id))
+              )),
+              React.createElement('tr', { style: { fontWeight: 'bold' } },
+                React.createElement('td', { className: 'left' }, 'Daily Total'),
+                ...Array.from({ length: days }, (_, i) => React.createElement('td', { key: i }, colTotalDraft(i + 1))),
+                React.createElement('td', null, grandDraft)
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Report (uses ID) ─────────────────────────
+    function PerEquipmentReport({ basePath, ym, equipments }) {
+      const [selectedId, setSelectedId] = useState('');
+      const [data, setData] = useState({});
+
+      useEffect(() => {
+        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => setData(s.exists() ? (s.val() || {}) : {}));
+      }, [basePath, ym]);
+
+      const row = data[selectedId] || {};
+      const total = Object.values(row).reduce((a, b) => a + Number(b || 0), 0);
+      const days = daysInMonth(ym);
+
+      return React.createElement('div', null,
+        React.createElement('select', { value: selectedId, onChange: e => setSelectedId(e.target.value) },
+          React.createElement('option', { value: '' }, 'Select Equipment'),
+          equipments.map(e => React.createElement('option', { key: e.id, value: e.id }, e.name))
+        ),
+        selectedId && React.createElement('table', { style: { marginTop: '16px' } },
+          React.createElement('thead', null,
+            React.createElement('tr', null,
+              React.createElement('th', null, 'Day'),
+              React.createElement('th', null, 'Liters')
+            )
+          ),
+          React.createElement('tbody', null,
+            ...Array.from({ length: days }, (_, i) => {
+              const d = i + 1;
+              return React.createElement('tr', { key: d },
+                React.createElement('td', null, d),
+                React.createElement('td', null, (row[d] ?? ''))
+              );
+            }),
+            React.createElement('tr', { style: { fontWeight: 'bold' } },
+              React.createElement('td', null, 'Total'),
+              React.createElement('td', null, total)
+            )
+          )
+        )
+      );
+    }
+
+    // ───────────────────────── Diesel Received (draft first) ─────────────────────────
     function ReceivedDraftForm({ ym, onDraft }) {
       const [date, setDate] = useState('');
       const [qty, setQty] = useState('');
@@ -500,7 +824,6 @@
         if (!date) e.date = 'Date is required.';
         else if (!isDateInMonth(date, ym)) e.date = 'Date must be within the selected month.';
         if (!isValidNonNegativeNumber(qty, 10000000)) e.qty = 'Liters must be a non-negative number (max 10,000,000).';
-
         setErrors(e);
         if (e.date || e.qty) return;
 
@@ -516,25 +839,9 @@
 
       return React.createElement('div', null,
         React.createElement('div', { className: 'row' },
-          React.createElement('input', {
-            type: 'date',
-            value: date,
-            onChange: e => setDate(e.target.value),
-            className: errors.date ? 'input-error' : ''
-          }),
-          React.createElement('input', {
-            type: 'number',
-            placeholder: 'Liters',
-            value: qty,
-            onChange: e => setQty(e.target.value),
-            className: errors.qty ? 'input-error' : ''
-          }),
-          React.createElement('input', {
-            className: 'flex-1',
-            placeholder: 'Notes / Tanker',
-            value: notes,
-            onChange: e => setNotes(e.target.value)
-          }),
+          React.createElement('input', { type: 'date', value: date, onChange: e => setDate(e.target.value), className: errors.date ? 'input-error' : '' }),
+          React.createElement('input', { type: 'number', placeholder: 'Liters', value: qty, onChange: e => setQty(e.target.value), className: errors.qty ? 'input-error' : '' }),
+          React.createElement('input', { className: 'flex-1', placeholder: 'Notes / Tanker', value: notes, onChange: e => setNotes(e.target.value) }),
           React.createElement('button', { onClick: addDraft }, 'Add to Draft')
         ),
         (errors.date || errors.qty) && React.createElement('div', { className: 'error' },
@@ -550,7 +857,7 @@
         return onValue(ref(db, `${basePath}/received/${ym}`), snap => {
           const arr = [];
           snap.exists() && snap.forEach(c => {
-            const v = c.val();
+            const v = c.val() || {};
             arr.push({ id: c.key, ...v, ts: typeof v.ts === 'number' ? v.ts : 0 });
           });
           setEntries(arr.sort((a,b) => b.ts - a.ts));
@@ -561,7 +868,6 @@
       const draftTotal = (drafts || []).reduce((s, d) => s + Number(d.quantity || 0), 0);
 
       return React.createElement('div', { style: { marginTop: '16px' } },
-        // Draft
         React.createElement('div', { className: 'section-subtle' },
           React.createElement('h4', null, `Draft Received (not saved): ${draftTotal.toLocaleString()} L`),
           (drafts && drafts.length > 0)
@@ -591,8 +897,6 @@
               )
             : React.createElement('div', { className: 'muted' }, 'No draft entries.')
         ),
-
-        // Saved
         React.createElement('div', { className: 'section-subtle' },
           React.createElement('h4', null, `Saved Received: ${savedTotal.toLocaleString()} L`),
           entries.length > 0 && React.createElement('table', null,
@@ -627,316 +931,7 @@
       );
     }
 
-    // ───────────────────────── Daily quick entry ─────────────────────────
-    function DailyEntryForm({ basePath, ym, equipments }) {
-      const [date, setDate] = useState('');
-      const [eq, setEq] = useState('');
-      const [liters, setLiters] = useState('');
-      const [eqFilter, setEqFilter] = useState('');
-      const [errors, setErrors] = useState({ date: '', eq: '', liters: '' });
-
-      const filteredEquipments = useMemo(() => {
-        const q = eqFilter.trim().toLowerCase();
-        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
-      }, [equipments, eqFilter]);
-
-      const validate = () => {
-        const e = { date: '', eq: '', liters: '' };
-        if (!date) e.date = 'Date is required.';
-        else if (!isDateInMonth(date, ym)) e.date = 'Date must be within the selected month.';
-        if (!eq) e.eq = 'Select equipment.';
-        if (!isValidNonNegativeNumber(liters, 1000000)) e.liters = 'Liters must be a non-negative number (max 1,000,000).';
-        setErrors(e);
-        return !e.date && !e.eq && !e.liters;
-      };
-
-      const save = async () => {
-        if (!validate()) return;
-        const day = new Date(date).getDate();
-        await update(ref(db, `${basePath}/sheets/${ym}/data/${eq}`), { [day]: Number(liters) });
-        setLiters('');
-      };
-
-      return React.createElement('div', null,
-        React.createElement('div', { className: 'row' },
-          React.createElement('input', {
-            type: 'date',
-            value: date,
-            onChange: e => setDate(e.target.value),
-            className: errors.date ? 'input-error' : ''
-          }),
-          React.createElement('input', {
-            type: 'text',
-            placeholder: 'Search equipment…',
-            value: eqFilter,
-            onChange: e => setEqFilter(e.target.value),
-            style: { width: '180px' }
-          }),
-          React.createElement('select', {
-            value: eq,
-            onChange: e => setEq(e.target.value),
-            className: errors.eq ? 'input-error' : ''
-          },
-            React.createElement('option', { value: '' }, 'Select Equipment'),
-            filteredEquipments.map(e => React.createElement('option', { key: e.id || e.name, value: e.name }, e.name))
-          ),
-          React.createElement('input', {
-            type: 'number',
-            placeholder: 'Liters',
-            value: liters,
-            onChange: e => setLiters(e.target.value),
-            className: errors.liters ? 'input-error' : ''
-          }),
-          React.createElement('button', { onClick: save }, 'Save')
-        ),
-        (errors.date || errors.eq || errors.liters) && React.createElement('div', { className: 'error' },
-          [errors.date, errors.eq, errors.liters].filter(Boolean).join(' ')
-        )
-      );
-    }
-
-    // ───────────────────────── Monthly Sheet (draft + queue) ─────────────────────────
-    function MonthlySheet({ basePath, ym, role, equipments, queueUpdate }) {
-      const [data, setData] = useState({});
-      const [draft, setDraft] = useState({});
-      const [rowFilter, setRowFilter] = useState('');
-
-      useEffect(() => {
-        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => {
-          const live = s.exists() ? s.val() : {};
-          setData(live);
-          setDraft(prev => {
-            const merged = { ...live };
-            for (const eqName of Object.keys(prev)) {
-              merged[eqName] = { ...(live[eqName] || {}), ...(prev[eqName] || {}) };
-            }
-            return merged;
-          });
-        });
-      }, [basePath, ym]);
-
-      const setCellDraft = (eqName, day, val) => {
-        const v = val === '' ? '' : val; // keep raw for validation
-        setDraft(d => ({ ...d, [eqName]: { ...(d[eqName] || {}), [day]: v } }));
-        if (isValidNonNegativeNumber(v, 1000000)) {
-          queueUpdate(`${basePath}/sheets/${ym}/data/${eqName}/${day}`, Number(v));
-        } else {
-          queueUpdate(`${basePath}/sheets/${ym}/data/${eqName}/${day}`, undefined);
-        }
-      };
-
-      const rowTotalDraft = eqName =>
-        Object.values(draft[eqName] || {}).reduce((a, b) => a + (Number(b) || 0), 0);
-
-      const days = daysInMonth(ym);
-
-      const list = useMemo(() => {
-        const q = rowFilter.trim().toLowerCase();
-        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
-      }, [equipments, rowFilter]);
-
-      const colTotalDraft = day => list.reduce((sum, eq) => sum + Number((draft[eq.name] || {})[day] || 0), 0);
-      const grandDraft = list.reduce((sum, eq) => sum + rowTotalDraft(eq.name), 0);
-
-      const addEquipment = async () => {
-        const name = (prompt('Equipment name') || '').trim();
-        if (!name) return;
-        const exists = (equipments || []).some(e => (e.name || '').trim().toLowerCase() === name.toLowerCase());
-        if (exists) return alert('Equipment already exists');
-
-        // ✅ Use push() to create unique key
-        const listRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
-        const newRef = push(listRef);
-        await set(newRef, { name });
-
-        // Seed draft so the row appears instantly
-        setDraft(d => ({ ...d, [name]: { ...(d[name] || {}) } }));
-      };
-
-      return React.createElement('div', null,
-        role === 'admin' && React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
-          React.createElement('button', { onClick: addEquipment }, '+ Add Equipment'),
-          React.createElement('input', {
-            type: 'text',
-            placeholder: 'Search equipment…',
-            value: rowFilter,
-            onChange: e => setRowFilter(e.target.value),
-            className: 'flex-1'
-          })
-        ),
-        React.createElement('div', { style: { overflowX: 'auto', maxHeight: '65vh' } },
-          React.createElement('table', null,
-            React.createElement('thead', null,
-              React.createElement('tr', null,
-                React.createElement('th', { className: 'left' }, 'Equipment'),
-                ...Array.from({ length: days }, (_, i) => React.createElement('th', { key: i }, i + 1)),
-                React.createElement('th', null, 'Total')
-              )
-            ),
-            React.createElement('tbody', null,
-              list.map(eq => React.createElement('tr', { key: eq.id || eq.name },
-                React.createElement('td', { className: 'left' }, eq.name),
-                ...Array.from({ length: days }, (_, i) => {
-                  const d = i + 1;
-                  const raw = (draft[eq.name] || {})[d];
-                  const isErr = raw !== '' && !isValidNonNegativeNumber(raw, 1000000);
-                  const display = (raw === 0 || raw) ? raw : '';
-                  const changed = ((data[eq.name] || {})[d] || 0) !== (Number(display) || 0);
-                  return React.createElement('td', { key: d },
-                    React.createElement('input', {
-                      type: 'number',
-                      value: display,
-                      style: { width: '70px' },
-                      className: isErr ? 'input-error' : '',
-                      onChange: e => setCellDraft(eq.name, d, e.target.value)
-                    }),
-                    isErr ? React.createElement('div', { className: 'error' }, '0–1,000,000') :
-                    changed ? React.createElement('span', { className: 'unsaved-dot', title: 'Unsaved' }) : null
-                  );
-                }),
-                React.createElement('td', null, rowTotalDraft(eq.name))
-              )),
-              React.createElement('tr', { style: { fontWeight: 'bold' } },
-                React.createElement('td', { className: 'left' }, 'Daily Total'),
-                ...Array.from({ length: days }, (_, i) => React.createElement('td', { key: i }, colTotalDraft(i + 1))),
-                React.createElement('td', null, grandDraft)
-              )
-            )
-          )
-        )
-      );
-    }
-
-    // ───────────────────────── Per-Equipment Report ─────────────────────────
-    function PerEquipmentReport({ basePath, ym, equipments }) {
-      const [selected, setSelected] = useState('');
-      const [data, setData] = useState({});
-
-      useEffect(() => {
-        return onValue(ref(db, `${basePath}/sheets/${ym}/data`), s => setData(s.exists() ? s.val() : {}));
-      }, [basePath, ym]);
-
-      const row = data[selected] || {};
-      const total = Object.values(row).reduce((a, b) => a + Number(b), 0);
-      const days = daysInMonth(ym);
-
-      return React.createElement('div', null,
-        React.createElement('select', { value: selected, onChange: e => setSelected(e.target.value) },
-          React.createElement('option', { value: '' }, 'Select Equipment'),
-          equipments.map(e => React.createElement('option', { key: e.id || e.name, value: e.name }, e.name))
-        ),
-        selected && React.createElement('table', { style: { marginTop: '16px' } },
-          React.createElement('thead', null,
-            React.createElement('tr', null,
-              React.createElement('th', null, 'Day'),
-              React.createElement('th', null, 'Liters')
-            )
-          ),
-          React.createElement('tbody', null,
-            ...Array.from({ length: days }, (_, i) => {
-              const d = i + 1;
-              return React.createElement('tr', { key: d },
-                React.createElement('td', null, d),
-                React.createElement('td', null, row[d] || 0)
-              );
-            }),
-            React.createElement('tr', { style: { fontWeight: 'bold' } },
-              React.createElement('td', null, 'Total'),
-              React.createElement('td', null, total)
-            )
-          )
-        )
-      );
-    }
-
-    // ───────────────────────── Equipment Manager ─────────────────────────
-    function EquipmentManager({ basePath, ym, equipments, setEquipments }) {
-      const [newName, setNewName] = useState('');
-      const [search, setSearch] = useState('');
-
-      const nameExistsLocal = (name) =>
-        (equipments || []).some(e => (e.name || '').trim().toLowerCase() === (name || '').trim().toLowerCase());
-
-      const deleteEquipment = async (id, name) => {
-        if (!confirm(`Delete equipment "${name}"?\nThis will also remove its monthly consumption row.`)) return;
-
-        await remove(ref(db, `${basePath}/sheets/${ym}/equipments/${id}`));
-        await remove(ref(db, `${basePath}/sheets/${ym}/data/${name}`)).catch(() => {});
-        setEquipments(prev => sortByName((prev || []).filter(e => e.id !== id)));
-      };
-
-      const filtered = useMemo(() => {
-        const q = search.trim().toLowerCase();
-        return sortByName((equipments || [])
-          .filter(e => !q || (e.name || '').toLowerCase().includes(q)));
-      }, [equipments, search]);
-
-      const addEquipment = async () => {
-        const name = (newName || '').trim();
-        if (!name) return alert('Enter equipment name');
-        if (nameExistsLocal(name)) return alert('Equipment already exists');
-
-        const listRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
-        const newRef = push(listRef);       // ✅ unique key
-        await set(newRef, { name });
-
-        setNewName('');
-        setEquipments(prev => sortByName([...(prev || []), { id: newRef.key, name }]));
-      };
-
-      return React.createElement('div', null,
-        React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
-          React.createElement('input', {
-            type: 'text',
-            placeholder: 'New equipment name',
-            value: newName,
-            onChange: e => setNewName(e.target.value),
-            className: 'flex-1'
-          }),
-          React.createElement('button', { onClick: addEquipment }, 'Add Equipment')
-        ),
-
-        React.createElement('div', { className: 'row', style: { marginBottom: '8px' } },
-          React.createElement('input', {
-            type: 'text',
-            placeholder: 'Search equipment…',
-            value: search,
-            onChange: e => setSearch(e.target.value),
-            className: 'flex-1'
-          })
-        ),
-
-        React.createElement('div', { className: 'section-subtle' },
-          filtered.length === 0
-            ? React.createElement('div', { className: 'muted' }, 'No equipments found.')
-            : React.createElement('ul', { style: { listStyle: 'none', padding: 0, margin: 0 } },
-                filtered.map(e =>
-                  React.createElement('li', {
-                    key: e.id, /* important: use id */
-                    className: 'left',
-                    style: {
-                      padding: '6px 0',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: '8px',
-                      borderBottom: '1px solid #1f2937'
-                    }
-                  },
-                    React.createElement('span', null, e.name),
-                    React.createElement('button', {
-                      className: 'danger',
-                      style: { padding: '4px 10px' },
-                      onClick: () => deleteEquipment(e.id, e.name)
-                    }, 'Delete')
-                  )
-                )
-              )
-        )
-      );
-    }
-
- // ───────────────────────── Import (push IDs + progress) ─────────────────────────
+// ───────────────────────── Import CSV (Option B) ─────────────────────────
 async function importCSV(basePath, ym, setEquipments, setImportProgress) {
   const file = document.getElementById('importFile')?.files?.[0];
   if (!file) return alert('Select CSV file');
@@ -952,33 +947,99 @@ async function importCSV(basePath, ym, setEquipments, setImportProgress) {
       const text = String(e.target.result || '');
       const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
       const lines = rawLines.map(l => l.trim()).filter(l => l.length > 0);
+
       if (lines.length < 2) {
         updateProgress({ running: false, phase: 'Invalid CSV (no data rows).' });
         return alert('Invalid CSV (no data rows)');
       }
 
-      const header = splitCSVLine(lines[0]).map(h => h.trim());
-      const lastHeader = (header[header.length - 1] || '').toLowerCase();
-      const hasTotal = lastHeader === 'total';
+      const header = splitCSVLine(lines[0]).map(h => (h || '').trim());
+
+      // ✅ IMPORTANT: With your new CSV format "...,total,,Date,liter,note"
+      // total is NOT the last column, so we must find it by name.
+      const totalIndex = header.findIndex(h => (h || '').trim().toLowerCase() === 'total');
+      if (totalIndex === -1) {
+        updateProgress({ running: false, phase: 'Invalid CSV (missing Total column).' });
+        return alert('Invalid CSV (missing Total column)');
+      }
+
+      // ✅ Received columns (right side)
+      const dateColIndex  = header.findIndex(h => (h || '').trim().toLowerCase() === 'date');
+      const literColIndex = header.findIndex(h => (h || '').trim().toLowerCase() === 'liter');
+      const noteColIndex  = header.findIndex(h => (h || '').trim().toLowerCase() === 'note');
+
       const monthDays = daysInMonth(ym);
-      const headerDayCount = (hasTotal ? header.length - 2 : header.length - 1);
+
+      // Day columns are between equipment (col0) and total
+      const headerDayCount = Math.max(0, totalIndex - 1);
       const dayCols = Math.min(headerDayCount, monthDays);
 
-      updateProgress({ phase: 'Scanning existing equipments…' });
-      const eqRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
-      const dataRoot = `${basePath}/sheets/${ym}/data`;
+      // Map day -> column index by header label "1..N"
+      const dayToColIndex = new Array(dayCols + 1);
+      for (let d = 1; d <= dayCols; d++) {
+        let idx = -1;
+        for (let j = 1; j < totalIndex; j++) {
+          if (header[j] === String(d)) { idx = j; break; }
+        }
+        dayToColIndex[d] = (idx !== -1) ? idx : d;
+      }
 
-      // Build name->id and id->name maps once
+      // preserve blank vs zero for equipment day cells
+      function parseNumericCell(raw) {
+        const s = (raw ?? '').toString().trim();
+        if (s === '') return null;          // blank
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      }
+
+      // ✅ Received liter parsing (blank -> null)
+      function parseReceivedLiter(raw) {
+        const s = (raw ?? '').toString().trim();
+        if (s === '') return null;
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      }
+
+      // ✅ Date-only normalize for dedupe/upsert (date only, not quantity)
+      function normalizeReceiveDate(s) {
+        return (s || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+      }
+
+      updateProgress({ phase: 'Scanning existing equipments…' });
+
+      const eqRef = ref(db, `${basePath}/sheets/${ym}/equipments`);
+      const eqRoot = `${basePath}/sheets/${ym}/equipments`;
+      const dataRoot = `${basePath}/sheets/${ym}/data`;
+      const recvRoot = `${basePath}/received/${ym}`;
+
       const exSnap = await get(eqRef);
       const nameToId = {};
-      const idToName = {};
       if (exSnap.exists()) {
         exSnap.forEach(c => {
           const v = c.val() || {};
           const storedName = (v.name || '').trim();
-          if (storedName) {
-            nameToId[storedName.toLowerCase()] = c.key;
-            idToName[c.key] = storedName;
+          if (storedName) nameToId[storedName.toLowerCase()] = c.key;
+        });
+      }
+
+      // ✅ NEW: Load existing received entries once and map by normalized date -> record id
+      // If duplicates already exist for same date, keep the one with latest ts.
+      const receiveDateToId = {};
+      const recvSnap = await get(ref(db, recvRoot));
+      if (recvSnap.exists()) {
+        recvSnap.forEach(c => {
+          const v = c.val() || {};
+          const key = normalizeReceiveDate(v.date);
+          if (!key) return;
+
+          const existing = receiveDateToId[key];
+          if (!existing) {
+            receiveDateToId[key] = { id: c.key, ts: v.ts || 0 };
+          } else {
+            const curTs = v.ts || 0;
+            if (curTs > (existing.ts || 0)) {
+              receiveDateToId[key] = { id: c.key, ts: curTs };
+            }
           }
         });
       }
@@ -995,83 +1056,133 @@ async function importCSV(basePath, ym, setEquipments, setImportProgress) {
       let errorCount = 0;
       const addedNames = new Set();
 
+      // ✅ NEW: per-import tracker: date -> targetId (so multiple CSV rows update same record)
+      const importedReceiveTargets = {};
+
       async function flushBatch() {
         if (Object.keys(batch).length === 0) return;
-        await update(ref(db), batch);
-        batch = {};
-        batchCells = 0;
+        try {
+          await update(ref(db), batch);
+        } catch (err) {
+          console.error("Import update failed:", err, batch);
+          throw err;
+        } finally {
+          batch = {};
+          batchCells = 0;
+        }
       }
 
       for (let i = 1; i < lines.length; i++) {
         try {
           const cells = splitCSVLine(lines[i]);
-          if (cells.length < 1) { processed++; updateProgress({ processed, cells: globalCells }); continue; }
+          if (cells.length < 1) { processed++; continue; }
 
-          const rawName = cells[0];
-          const name = (rawName || '').trim();
-          if (!name) { processed++; updateProgress({ processed, cells: globalCells }); continue; }
+          const name = (cells[0] || '').trim();
 
-          // normalize name and check existing equipment id
+          // ✅ Read received columns from this row
+          let rDate = '';
+          let rLiter = null;
+          let rNote = '';
+
+          if (dateColIndex !== -1)  rDate  = (cells[dateColIndex] || '').trim();
+          if (literColIndex !== -1) rLiter = parseReceivedLiter(cells[literColIndex]);
+          if (noteColIndex !== -1)  rNote  = (cells[noteColIndex] || '').trim();
+
+          // ✅ UPDATED: received upsert by date
+          // If date already exists in DB -> update same entry
+          // Else -> create once
+          async function addReceivedUpsertByDate() {
+            const key = normalizeReceiveDate(rDate);
+            if (!key) return;
+
+            // Only import/update if date exists AND liter cell is present (same rule as before)
+            if (rLiter === null) return;
+
+            // Choose record id to update/insert:
+            // 1) if already used this import, keep using it
+            // 2) else if exists in DB, update that one
+            // 3) else create new
+            let targetId =
+              importedReceiveTargets[key] ||
+              receiveDateToId[key]?.id ||
+              null;
+
+            if (!targetId) {
+              targetId = push(ref(db, recvRoot)).key;
+              receiveDateToId[key] = { id: targetId, ts: Date.now() };
+            }
+
+            importedReceiveTargets[key] = targetId;
+
+            // Upsert (overwrite quantity/notes for that date)
+            batch[`${recvRoot}/${targetId}`] = {
+              date: rDate,
+              quantity: rLiter,
+              notes: rNote,
+              ts: Date.now()
+            };
+            batchCells++;
+
+            if (batchCells >= BATCH_SIZE) {
+              updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
+              await flushBatch();
+              updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
+            }
+          }
+
+          // ✅ If equipment name is blank: still allow receive-only rows
+          if (!name) {
+            await addReceivedUpsertByDate();
+            processed++;
+            continue;
+          }
+
           const norm = name.toLowerCase();
           let id = nameToId[norm];
 
-          // First scan day values to know if there are any positive values
-          let rowHasValues = false;
-          const dayValues = new Array(dayCols + 1); // 1-based index for convenience
+          const csvOrder = i; // source-of-truth order (row position)
+
+          // read day values
+          const dayValues = new Array(dayCols + 1);
           for (let d = 1; d <= dayCols; d++) {
-            const colIndex = d;
-            const v = toNum(cells[colIndex]);
-            dayValues[d] = v;
-            if (v > 0) rowHasValues = true;
+            const colIndex = dayToColIndex[d];
+            dayValues[d] = parseNumericCell(cells[colIndex]); // null blank, 0 preserved
           }
 
-          // If equipment exists: update its values (only non-zero cells)
-          if (id) {
-            // use stored name for data path to keep consistency
-            const storedName = idToName[id] || name;
-            for (let d = 1; d <= dayCols; d++) {
-              const v = dayValues[d];
-              if (v > 0) {
-                batch[`${dataRoot}/${id}/${d}`] = v; // use id-keyed data
-                batchCells++;
-                globalCells++;
-              }
-              if (batchCells >= BATCH_SIZE) {
-                updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
-                await flushBatch();
-                updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
-              }
-            }
+          if (!id) {
+            // Option B: create equipment even if no values
+            const newRef = push(eqRef);
+            await set(newRef, { name, order: csvOrder });
+            id = newRef.key;
+            nameToId[norm] = id;
+            addedNames.add(name);
           } else {
-            // Equipment does not exist yet.
-            // Only create the equipment and import its values if the row actually has values.
-            if (rowHasValues) {
-              const newRef = push(eqRef);     // ✅ unique key
-              await set(newRef, { name });
-              id = newRef.key;
-              nameToId[norm] = id;
-              idToName[id] = name;
-              addedNames.add(name);
+            // existing: set order to match CSV
+            batch[`${eqRoot}/${id}/order`] = csvOrder;
+          }
 
-              for (let d = 1; d <= dayCols; d++) {
-                const v = dayValues[d];
-                if (v > 0) {
-                  batch[`${dataRoot}/${id}/${d}`] = v; // data keyed by id for new equipment
-                  batchCells++;
-                  globalCells++;
-                }
-                if (batchCells >= BATCH_SIZE) {
-                  updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
-                  await flushBatch();
-                  updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
-                }
-              }
-            } else {
-              // No values and equipment doesn't exist: skip entirely (do not create empty equipment)
+          // write cells: write numeric (including 0), skip blanks
+          for (let d = 1; d <= dayCols; d++) {
+            const v = dayValues[d];
+            if (v !== null) {
+              batch[`${dataRoot}/${id}/${d}`] = v;
+              batchCells++;
+              globalCells++;
+            }
+
+            if (batchCells >= BATCH_SIZE) {
+              updateProgress({ phase: `Writing batch… (${globalCells} cells)`, processed, cells: globalCells });
+              await flushBatch();
+              updateProgress({ phase: `Parsing CSV rows…`, processed, cells: globalCells });
             }
           }
+
+          // ✅ import received from same row, but UPSERT by date
+          await addReceivedUpsertByDate();
+
         } catch (err) {
           errorCount++;
+          console.error("Row import error:", err);
         } finally {
           processed++;
           if (processed % 10 === 0 || processed === totalRows) {
@@ -1086,108 +1197,167 @@ async function importCSV(basePath, ym, setEquipments, setImportProgress) {
         await flushBatch();
       }
 
-      // Refresh equipments from DB and show all
+      // refresh equipments
       updateProgress({ phase: 'Refreshing equipments…' });
       const snap = await get(eqRef);
       const arr = [];
       snap.exists() && snap.forEach(c => arr.push({ id: c.key, ...(c.val() || {}) }));
-      setEquipments(sortByName(arr));
+
+      arr.sort((a,b) => (a.order ?? 999999999) - (b.order ?? 999999999));
+      setEquipments(arr);
 
       updateProgress({
         running: false,
         phase: `Import finished. Added: ${addedNames.size}, Cells written: ${globalCells}, Errors: ${errorCount}`,
         errors: errorCount
       });
+
       alert(`Import finished.\nAdded: ${addedNames.size}\nCells written: ${globalCells}\nErrors: ${errorCount}`);
+
     } catch (err) {
-      updateProgress({ running: false, phase: `Import failed: ${err?.message || String(err)}` });
+      console.error("Import failed:", err);
+      setImportProgress(prev => ({ ...prev, running: false, phase: `Import failed: ${err?.message || String(err)}` }));
       alert(`Import failed: ${err?.message || String(err)}`);
     }
   };
+
   reader.readAsText(file);
 }
-
-    // ───────────────────────── Export CSV ─────────────────────────
+// ───────────────────────── Export CSV (Equipment rows + Receive on right side in top rows) ─────────────────────────
 async function exportCSV(basePath, ym, company, site) {
-  const days = daysInMonth(ym);
+  try {
+    const MAX_DAYS = 31;
+    const actualDays = daysInMonth(ym);
 
-  // fetch equipments and data in parallel
-  const [eqSnap, dataSnap] = await Promise.all([
-    get(ref(db, `${basePath}/sheets/${ym}/equipments`)),
-    get(ref(db, `${basePath}/sheets/${ym}/data`))
-  ]);
+    const [eqSnap, dataSnap, recvSnap] = await Promise.all([
+      get(ref(db, `${basePath}/sheets/${ym}/equipments`)),
+      get(ref(db, `${basePath}/sheets/${ym}/data`)),
+      get(ref(db, `${basePath}/received/${ym}`))
+    ]);
 
-  // build equipments array in the same order as stored (page order)
-  const eqs = [];
-  eqSnap.exists() && eqSnap.forEach(c => eqs.push({ id: c.key, ...(c.val() || {}) }));
+    const data = dataSnap.exists() ? (dataSnap.val() || {}) : {};
 
-  // data may be keyed by equipment id (preferred) or by equipment name (legacy)
-  const data = dataSnap.exists() ? dataSnap.val() : {};
+    // ✅ Build full equipment list (fix: if equipments node has only 1, still export all from data)
+    const eqMap = new Map();
 
-  // helper to safely escape CSV fields
-  function escapeCSVField(v) {
-    if (v === null || v === undefined) return '';
-    const s = String(v);
-    // escape double quotes by doubling them, wrap field in quotes if it contains comma, quote or newline
-    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-    return s;
-  }
-
-  // header: Equipment,1,2,...,N,Total
-  let csv = 'Equipment,' + Array.from({ length: days }, (_, i) => i + 1).join(',') + ',Total\n';
-
-  // iterate equipments as shown in the web app (includes equipments with no data)
-  for (const eq of eqs) {
-    // prefer id-keyed data; fall back to name-keyed data for backward compatibility
-    const rowById = data && data[eq.id];
-    const rowByName = data && data[eq.name];
-    const row = rowById || rowByName || {};
-
-    let tot = 0;
-    const vals = [];
-    for (let d = 1; d <= days; d++) {
-      const v = Number(row[d] || 0);
-      tot += v;
-      vals.push(v);
+    if (eqSnap.exists()) {
+      eqSnap.forEach(c => {
+        const v = c.val() || {};
+        eqMap.set(c.key, { id: c.key, name: v.name || c.key, order: v.order });
+      });
     }
 
-    csv += `${escapeCSVField(eq.name)},${vals.join(',')},${tot}\n`;
-  }
+    // Add missing equipment IDs from data
+    for (const id of Object.keys(data || {})) {
+      if (!eqMap.has(id)) {
+        eqMap.set(id, { id, name: id, order: 999999999 });
+      }
+    }
 
-  // If there are any data entries that don't have a corresponding equipment record,
-  // include them as well so the exported sheet is complete.
-  // (This covers cases where data exists but equipments list is missing entries.)
-  const knownKeys = new Set(eqs.map(e => e.id).concat(eqs.map(e => (e.name || '').toLowerCase())));
-  if (data && typeof data === 'object') {
-    for (const key of Object.keys(data)) {
-      // skip if key matches an equipment id or name already exported
-      const isIdExported = eqs.some(e => e.id === key);
-      const isNameExported = eqs.some(e => (e.name || '').toLowerCase() === (key || '').toLowerCase());
-      if (isIdExported || isNameExported) continue;
+    const eqs = Array.from(eqMap.values()).sort(
+      (a, b) => (a.order ?? 999999999) - (b.order ?? 999999999)
+    );
 
-      // treat this key as an extra row (key might be id or name)
-      const row = data[key] || {};
+    // ✅ Received list
+    const received = [];
+    if (recvSnap.exists()) {
+      recvSnap.forEach(c => {
+        const v = c.val() || {};
+        received.push({
+          id: c.key,
+          date: v.date || '',
+          liter: Number(v.quantity || 0),
+          note: v.notes || '',
+          ts: v.ts || ''
+        });
+      });
+    }
+
+    // Sort as you want (latest first). If you want oldest first, swap a/b.
+    received.sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+
+    // CSV escape helper
+    function escapeCSVField(v) {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    }
+
+    // ✅ Header EXACT like your file: total then ONE blank column then Date,liter,note
+    let csv =
+      'equipment,' +
+      Array.from({ length: MAX_DAYS }, (_, i) => i + 1).join(',') +
+      ',total,,Date,liter,note\n';
+
+    // ✅ Main export: equipment rows always printed
+    // ✅ Receive is placed beside top rows (zip by index)
+    for (let i = 0; i < eqs.length; i++) {
+      const eq = eqs[i];
+      const row = (data && data[eq.id]) || {};
+
       let tot = 0;
       const vals = [];
-      for (let d = 1; d <= days; d++) {
-        const v = Number(row[d] || 0);
+
+      for (let d = 1; d <= MAX_DAYS; d++) {
+        if (d > actualDays) {
+          vals.push('');
+          continue;
+        }
+
+        const raw = row?.[d];
+
+        if (raw === undefined || raw === null || raw === '') {
+          vals.push('');
+          continue;
+        }
+
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v === 0) {
+          // ✅ 0 treated as no value -> blank
+          vals.push('');
+          continue;
+        }
+
         tot += v;
         vals.push(v);
       }
-      // use the key as the label if no name available
-      csv += `${escapeCSVField(key)},${vals.join(',')},${tot}\n`;
+
+      // ✅ receive values on same row for first N rows
+      const r = received[i]; // zip by row index (this is what your sample shows)
+
+      const rDate = r ? r.date : '';
+      const rLiter = r ? (r.liter === 0 ? '' : r.liter) : '';
+      const rNote = r ? r.note : '';
+
+      csv += `${escapeCSVField(eq.name)},${vals.join(',')},${tot},,${escapeCSVField(rDate)},${escapeCSVField(rLiter)},${escapeCSVField(rNote)}\n`;
+      //                                             ^ blank column after total (two commas)
     }
+
+    // ✅ If received has MORE rows than equipment, add extra receive-only rows (optional)
+    // If you DO NOT want extra rows, you can remove this block.
+    for (let j = eqs.length; j < received.length; j++) {
+      const r = received[j];
+      const emptyDays = Array.from({ length: MAX_DAYS }, () => '').join(',');
+      csv += `,${emptyDays},,,${escapeCSVField(r.date)},${escapeCSVField(r.liter === 0 ? '' : r.liter)},${escapeCSVField(r.note)}\n`;
+    }
+
+    // Download
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${company || 'company'}-${site || 'site'}-${ym}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+  } catch (e) {
+    console.error("Export failed:", e);
+    alert("Export failed: " + (e?.message || e));
   }
-
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${company || 'company'}-${site || 'site'}-${ym}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
-
     // ───────────────────────── Render ─────────────────────────
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(App));
