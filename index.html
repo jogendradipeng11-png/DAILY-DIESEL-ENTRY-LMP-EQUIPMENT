@@ -60,15 +60,14 @@
 
     // ✅ Your Firebase config (unchanged)
     const firebaseConfig = {
-      apiKey: "AIzaSyB4WcFUhQLHYSU6lecY9xWAQYjApNp9LG4",
-      authDomain: "studio-6256088054-e3eee.firebaseapp.com",
-      databaseURL: "https://studio-6256088054-e3eee-default-rtdb.firebaseio.com",
-      projectId: "studio-6256088054-e3eee",
-      storageBucket: "studio-6256088054-e3eee.firebasestorage.app",
-      messagingSenderId: "551506815271",
-      appId: "1:551506815271:web:f55987b56469db956e2102",
-      measurementId: "G-FYSMRPVYMX"
-    };
+  apiKey: "AIzaSyAKUlLl-s7qH-L1H5RF8UXb2S9RdRPZVoc",
+  authDomain: "fueltrack-geco0.firebaseapp.com",
+  databaseURL: "https://fueltrack-geco0-default-rtdb.firebaseio.com",
+  projectId: "fueltrack-geco0",
+  storageBucket: "fueltrack-geco0.firebasestorage.app",
+  messagingSenderId: "586223747921",
+  appId: "1:586223747921:web:eee1e3196b9a3ac4af0970"
+};
 
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
@@ -598,75 +597,205 @@
       );
     }
 
-    // ───────────────────────── Daily Entry (uses ID) ─────────────────────────
-    function DailyEntryForm({ basePath, ym, equipments }) {
-      const [date, setDate] = useState('');
-      const [eqId, setEqId] = useState('');
-      const [liters, setLiters] = useState('');
-      const [eqFilter, setEqFilter] = useState('');
-      const [errors, setErrors] = useState({ date: '', eq: '', liters: '' });
+    function getDayFromISODate(iso) {
+  return Number((iso || "").split("-")[2] || 0);
+}
 
-      const filteredEquipments = useMemo(() => {
-        const q = eqFilter.trim().toLowerCase();
-        return (equipments || []).filter(e => !q || (e.name || '').toLowerCase().includes(q));
-      }, [equipments, eqFilter]);
+// ───────────────────────── Daily Entry (uses ID) ─────────────────────────
+function DailyEntryForm({ basePath, ym, equipments }) {
+  const [date, setDate] = useState("");
+  const [eqId, setEqId] = useState("");
+  const [liters, setLiters] = useState("");
+  const [eqFilter, setEqFilter] = useState("");
+  const [errors, setErrors] = useState({ date: "", eq: "", liters: "" });
 
-      const validate = () => {
-        const e = { date: '', eq: '', liters: '' };
-        if (!date) e.date = 'Date is required.';
-        else if (!isDateInMonth(date, ym)) e.date = 'Date must be within selected month.';
-        if (!eqId) e.eq = 'Select equipment.';
-        if (!isValidNonNegativeNumber(liters, 1000000)) e.liters = 'Liters must be 0–1,000,000';
-        setErrors(e);
-        return !e.date && !e.eq && !e.liters;
-      };
+  // ✅ mode: "add" or "overwrite"
+  const [mode, setMode] = useState("add");
 
-      const save = async () => {
-        if (!validate()) return;
-        const day = new Date(date).getDate();
-        await update(ref(db, `${basePath}/sheets/${ym}/data/${eqId}`), { [day]: Number(liters) });
-        setLiters('');
-      };
+  // ✅ load current cell value
+  const [loadingCell, setLoadingCell] = useState(false);
+  const [existingLiters, setExistingLiters] = useState(null); // null = empty/not loaded
 
-      return React.createElement('div', null,
-        React.createElement('div', { className: 'row' },
-          React.createElement('input', {
-            type: 'date',
-            value: date,
-            onChange: e => setDate(e.target.value),
-            className: errors.date ? 'input-error' : ''
-          }),
-          React.createElement('input', {
-            type: 'text',
-            placeholder: 'Search equipment…',
-            value: eqFilter,
-            onChange: e => setEqFilter(e.target.value),
-            style: { width: '180px' }
-          }),
-          React.createElement('select', {
-            value: eqId,
-            onChange: e => setEqId(e.target.value),
-            className: errors.eq ? 'input-error' : ''
-          },
-            React.createElement('option', { value: '' }, 'Select Equipment'),
-            filteredEquipments.map(e =>
-              React.createElement('option', { key: e.id, value: e.id }, e.name)
-            )
-          ),
-          React.createElement('input', {
-            type: 'number',
-            placeholder: 'Liters',
-            value: liters,
-            onChange: e => setLiters(e.target.value),
-            className: errors.liters ? 'input-error' : ''
-          }),
-          React.createElement('button', { onClick: save }, 'Save')
-        ),
-        (errors.date || errors.eq || errors.liters) && React.createElement('div', { className: 'error' },
-          [errors.date, errors.eq, errors.liters].filter(Boolean).join(' ')
-        )
-      );
+  const filteredEquipments = useMemo(() => {
+    const q = eqFilter.trim().toLowerCase();
+    return (equipments || []).filter(e => !q || (e.name || "").toLowerCase().includes(q));
+  }, [equipments, eqFilter]);
+
+  // ✅ Load existing liters when date+equipment changes
+  useEffect(() => {
+    const loadExistingValue = async () => {
+      if (!date || !eqId || !isDateInMonth(date, ym)) {
+        setExistingLiters(null);
+        setLiters("");
+        return;
+      }
+
+      const day = getDayFromISODate(date);
+      if (!day) return;
+
+      setLoadingCell(true);
+      try {
+        const cellRef = ref(db, `${basePath}/sheets/${ym}/data/${eqId}/${day}`);
+        const snap = await get(cellRef);
+
+        if (snap.exists()) {
+          const v = Number(snap.val()) || 0;
+          setExistingLiters(v);
+
+          // ✅ UX choice:
+          // - overwrite mode: show existing in input
+          // - add mode: keep input blank (user enters only increment)
+          setLiters(mode === "overwrite" ? String(v) : "");
+        } else {
+          setExistingLiters(null);
+          setLiters("");
+        }
+      } catch (err) {
+        console.error("Failed to load cell value", err);
+        setExistingLiters(null);
+      } finally {
+        setLoadingCell(false);
+      }
+    };
+
+    loadExistingValue();
+    // include mode so switching add/overwrite adjusts input behavior
+  }, [date, eqId, ym, basePath, mode]);
+
+  const validate = () => {
+    const e = { date: "", eq: "", liters: "" };
+    if (!date) e.date = "Date is required.";
+    else if (!isDateInMonth(date, ym)) e.date = "Date must be within selected month.";
+
+    if (!eqId) e.eq = "Select equipment.";
+
+    // entered liters must be valid
+    if (!isValidNonNegativeNumber(liters, 1000000)) e.liters = "Liters must be 0–1,000,000";
+
+    // ✅ extra check: in ADD mode final total must also be within limit
+    if (!e.liters && mode === "add") {
+      const entered = Number(liters);
+      const current = existingLiters === null ? 0 : Number(existingLiters);
+      const finalValue = current + entered;
+      if (finalValue > 1000000) e.liters = "Final total exceeds 1,000,000";
     }
+
+    setErrors(e);
+    return !e.date && !e.eq && !e.liters;
+  };
+
+  const save = async () => {
+    if (!validate()) return;
+
+    const day = getDayFromISODate(date);
+
+    // cell reference for transaction / overwrite
+    const cellRef = ref(db, `${basePath}/sheets/${ym}/data/${eqId}/${day}`);
+
+    try {
+      if (mode === "overwrite") {
+        // ✅ Overwrite
+        const val = Number(liters);
+        await set(cellRef, val);
+        setExistingLiters(val);
+        setLiters(String(val));
+      } else {
+        // ✅ Add mode (transaction-safe)
+        const addVal = Number(liters);
+
+        const result = await runTransaction(cellRef, (currentVal) => {
+          const curr = Number(currentVal) || 0;
+          return curr + addVal;
+        });
+
+        if (result.committed) {
+          const finalValue = Number(result.snapshot.val()) || 0;
+          setExistingLiters(finalValue);
+          setLiters(""); // keep blank for next increment
+        }
+      }
+    } catch (err) {
+      console.error("Save failed:", err);
+      alert("Save failed: " + (err?.message || err));
+    }
+  };
+
+  return React.createElement(
+    "div",
+    null,
+    React.createElement(
+      "div",
+      { className: "row" },
+
+      React.createElement("input", {
+        type: "date",
+        value: date,
+        onChange: (e) => setDate(e.target.value),
+        className: errors.date ? "input-error" : ""
+      }),
+
+      React.createElement("input", {
+        type: "text",
+        placeholder: "Search equipment…",
+        value: eqFilter,
+        onChange: (e) => setEqFilter(e.target.value),
+        style: { width: "180px" }
+      }),
+
+      React.createElement(
+        "select",
+        {
+          value: eqId,
+          onChange: (e) => setEqId(e.target.value),
+          className: errors.eq ? "input-error" : ""
+        },
+        React.createElement("option", { value: "" }, "Select Equipment"),
+        filteredEquipments.map(e =>
+          React.createElement("option", { key: e.id, value: e.id }, e.name)
+        )
+      ),
+
+      // ✅ Mode selector
+      React.createElement(
+        "select",
+        {
+          value: mode,
+          onChange: (e) => setMode(e.target.value),
+          style: { width: "140px" }
+        },
+        React.createElement("option", { value: "add" }, "Add Mode (+)"),
+        React.createElement("option", { value: "overwrite" }, "Overwrite")
+      ),
+
+      React.createElement("input", {
+        type: "number",
+        placeholder: loadingCell ? "Loading…" : (mode === "add" ? "Add liters" : "Liters"),
+        value: liters,
+        onChange: (e) => setLiters(e.target.value),
+        className: errors.liters ? "input-error" : "",
+        disabled: loadingCell
+      }),
+
+      React.createElement("button", { onClick: save, disabled: loadingCell }, "Save")
+    ),
+
+    // ✅ Existing cell display
+    React.createElement(
+      "div",
+      { style: { marginTop: "6px", fontSize: "12px", opacity: 0.85 } },
+      loadingCell
+        ? "Loading existing value…"
+        : `Current cell value: ${existingLiters === null ? "(empty)" : existingLiters}`
+    ),
+
+    (errors.date || errors.eq || errors.liters) &&
+      React.createElement(
+        "div",
+        { className: "error" },
+        [errors.date, errors.eq, errors.liters].filter(Boolean).join(" ")
+      )
+  );
+}
 
     // ───────────────────────── Monthly Sheet (uses ID) ─────────────────────────
     function MonthlySheet({ basePath, ym, equipments, queueUpdate, hasPending }) {
